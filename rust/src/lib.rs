@@ -75,6 +75,38 @@ pub enum AsciiPredicate {
     NotChar(u8),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimesOptions {
+    pub min: usize,
+    pub max: Option<usize>,
+}
+
+impl TimesOptions {
+    pub fn exact(n: usize) -> Self {
+        Self {
+            min: n,
+            max: Some(n),
+        }
+    }
+
+    pub fn min_max(min: usize, max: usize) -> Self {
+        Self {
+            min,
+            max: Some(max),
+        }
+    }
+
+    pub fn min_only(min: usize) -> Self {
+        Self { min, max: None }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatWhileControl {
+    Cont,
+    Halt,
+}
+
 pub fn empty() -> Parser {
     Parser::new(|input, cursor| {
         Ok(ParseSuccess {
@@ -322,6 +354,103 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
                     break;
                 }
             }
+        }
+
+        Ok(ParseSuccess {
+            tokens,
+            rest,
+            cursor: cur,
+        })
+    })
+}
+
+pub fn times(parser: Parser, options: TimesOptions) -> Parser {
+    if let Some(max) = options.max {
+        if max < options.min {
+            return Parser::new(move |input, cursor| {
+                Err(ParseFailure {
+                    reason: "invalid times options: max must be >= min".to_string(),
+                    rest: input,
+                    cursor,
+                })
+            });
+        }
+    }
+
+    repeat(parser, options.min, options.max)
+}
+
+pub fn lookahead(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        parser.run(input, cursor).map(|_| ParseSuccess {
+            tokens: Vec::new(),
+            rest: input,
+            cursor,
+        })
+    })
+}
+
+pub fn lookahead_not(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| match parser.run(input, cursor) {
+        Ok(_) => Err(ParseFailure {
+            reason: "did not expect lookahead parser to match".to_string(),
+            rest: input,
+            cursor,
+        }),
+        Err(_) => Ok(ParseSuccess {
+            tokens: Vec::new(),
+            rest: input,
+            cursor,
+        }),
+    })
+}
+
+pub fn repeat_while<F>(parser: Parser, while_fn: F, min: usize, max: Option<usize>) -> Parser
+where
+    F: Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync + 'static,
+{
+    Parser::new(move |input, cursor| {
+        let mut rest = input;
+        let mut cur = cursor;
+        let mut tokens = Vec::new();
+        let mut count = 0usize;
+
+        loop {
+            if let Some(max) = max {
+                if count >= max {
+                    break;
+                }
+            }
+
+            match while_fn(rest, cur) {
+                RepeatWhileControl::Halt => break,
+                RepeatWhileControl::Cont => {}
+            }
+
+            match parser.run(rest, cur) {
+                Ok(ok) => {
+                    if ok.rest.len() == rest.len() {
+                        return Err(ParseFailure {
+                            reason: "repeat_while parser consumed no input".to_string(),
+                            rest,
+                            cursor: cur,
+                        });
+                    }
+                    tokens.extend(ok.tokens);
+                    rest = ok.rest;
+                    cur = ok.cursor;
+                    count += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if count < min {
+            return Err(ParseFailure {
+                reason: "repeat_while did not reach minimum repetitions".to_string(),
+                rest,
+                cursor: cur,
+            });
         }
 
         Ok(ParseSuccess {
