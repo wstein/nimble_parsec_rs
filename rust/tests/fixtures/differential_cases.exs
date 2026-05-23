@@ -42,13 +42,19 @@ defmodule DifferentialFixtures do
     Enum.each(cases, fn {name, input, fun} ->
       case fun.(input) do
         {:ok, tokens, rest, _context, _line, offset} ->
-          IO.puts("ok|#{name}|#{rest}|#{offset}|#{length(tokens)}")
+          IO.puts("ok|#{name}|#{rest}|#{offset}|#{length(tokens)}|#{format_tokens(tokens)}")
 
         {:error, reason, rest, _context, _line, offset} ->
           IO.puts("err|#{name}|#{rest}|#{offset}|#{reason}")
       end
     end)
   end
+
+  # Serializes a token list into a stable, language-neutral string so the Rust
+  # differential runner can compare the parsed values, not just their count.
+  defp format_tokens(tokens), do: Enum.map_join(tokens, ",", &format_token/1)
+  defp format_token(int) when is_integer(int), do: Integer.to_string(int)
+  defp format_token(bin) when is_binary(bin), do: "s:" <> bin
 end
 
 DifferentialFixtures.run()

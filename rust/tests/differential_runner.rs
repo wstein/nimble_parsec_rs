@@ -3,7 +3,7 @@ use std::process::Command;
 
 use nimble_parsec_rs::{
     ascii_char, concat, ignore, integer_exact, integer_min, lookahead, repeat_while, string,
-    AsciiPredicate, RepeatWhileControl,
+    AsciiPredicate, RepeatWhileControl, Value,
 };
 
 #[test]
@@ -26,27 +26,27 @@ fn differential_runner_matches_shared_elixir_scenarios() {
 
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() >= 5 {
+        if parts.len() >= 6 {
             elixir.insert(parts[1].to_string(), parts);
         }
     }
 
-    let rust_datetime = datetime_parser().parse("2010-04-17T14:12:34").expect("datetime parse");
+    let rust_datetime = datetime_parser()
+        .parse("2010-04-17T14:12:34")
+        .expect("datetime parse");
     assert_case(
         elixir.get("datetime").expect("missing datetime case"),
-        rust_datetime.rest,
-        rust_datetime.cursor.byte_offset,
-        rust_datetime.tokens.len(),
+        &rust_datetime,
     );
 
-    let rust_lookahead = lookahead_digit_parser().parse("a0").expect("lookahead parse");
+    let rust_lookahead = lookahead_digit_parser()
+        .parse("a0")
+        .expect("lookahead parse");
     assert_case(
         elixir
             .get("lookahead_digit")
             .expect("missing lookahead_digit case"),
-        rust_lookahead.rest,
-        rust_lookahead.cursor.byte_offset,
-        rust_lookahead.tokens.len(),
+        &rust_lookahead,
     );
 
     let rust_repeat = repeat_while_digits_parser()
@@ -56,27 +56,50 @@ fn differential_runner_matches_shared_elixir_scenarios() {
         elixir
             .get("repeat_while_digits")
             .expect("missing repeat_while_digits case"),
-        rust_repeat.rest,
-        rust_repeat.cursor.byte_offset,
-        rust_repeat.tokens.len(),
+        &rust_repeat,
     );
 }
 
-fn assert_case(elixir: &[&str], rust_rest: &str, rust_offset: usize, rust_token_count: usize) {
+fn assert_case(elixir: &[&str], rust: &nimble_parsec_rs::ParseSuccess<'_>) {
     assert_eq!(elixir[0], "ok");
-    assert_eq!(elixir[2], rust_rest);
-    assert_eq!(elixir[3].parse::<usize>().expect("offset parse"), rust_offset);
+    assert_eq!(elixir[2], rust.rest);
+    assert_eq!(
+        elixir[3].parse::<usize>().expect("offset parse"),
+        rust.cursor.byte_offset
+    );
     assert_eq!(
         elixir[4].parse::<usize>().expect("token_count parse"),
-        rust_token_count
+        rust.tokens.len()
     );
+    assert_eq!(elixir[5], format_tokens(&rust.tokens));
+}
+
+/// Mirrors `format_tokens/1` in the Elixir fixture so token values can be
+/// compared directly, not just by count.
+fn format_tokens(tokens: &[Value]) -> String {
+    tokens
+        .iter()
+        .map(format_token)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_token(value: &Value) -> String {
+    match value {
+        Value::Int(n) => n.to_string(),
+        Value::Str(s) => format!("s:{s}"),
+        Value::Tagged(name, inner) => format!("t:{name}:({})", format_tokens(inner)),
+    }
 }
 
 fn datetime_parser() -> nimble_parsec_rs::Parser {
     let date = concat(
         concat(
             integer_exact(4),
-            concat(ignore(string("-")), concat(integer_exact(2), ignore(string("-")))),
+            concat(
+                ignore(string("-")),
+                concat(integer_exact(2), ignore(string("-"))),
+            ),
         ),
         integer_exact(2),
     );
@@ -85,7 +108,10 @@ fn datetime_parser() -> nimble_parsec_rs::Parser {
         integer_exact(2),
         concat(
             ignore(string(":")),
-            concat(integer_exact(2), concat(ignore(string(":")), integer_exact(2))),
+            concat(
+                integer_exact(2),
+                concat(ignore(string(":")), integer_exact(2)),
+            ),
         ),
     );
 

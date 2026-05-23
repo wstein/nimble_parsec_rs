@@ -58,7 +58,7 @@ Migration challenges:
   - Control-flow combinators (`choice`, `repeat`, `lookahead`)
   - Traversal/context combinators
   - Generator behavior
-- Add differential testing against Elixir outputs for shared fixtures
+- Add differential testing against Elixir outputs for shared fixtures (the runner compares rest, byte offset, token count, and token values)
 - Add criterion benchmarks to compare runtime combinators and generated variants
 
 ## Mid-Term Improvements
@@ -71,4 +71,4 @@ Migration challenges:
 ## Current Status
 
 - Elixir baseline: `mix test` -> 160 tests passing
-- Rust phase 1: implemented runtime subset and initial parity tests in [rust/tests/parity_phase1.rs](rust/tests/parity_phase1.rs)
+- Rust: runtime subset with thematic parity tests ([choice_and_repeat.rs](rust/tests/choice_and_repeat.rs), [control_flow_phase2.rs](rust/tests/control_flow_phase2.rs), [integration_examples.rs](rust/tests/integration_examples.rs)) and a value-level [differential_runner.rs](rust/tests/differential_runner.rs) against shared Elixir fixtures
