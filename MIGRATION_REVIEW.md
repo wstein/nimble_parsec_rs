@@ -45,7 +45,7 @@ Migration challenges:
 
 ## Security and Reliability Notes
 
-- Prevent infinite loops in repetition combinators when no input is consumed
+- Repetition combinators stop when an iteration consumes no input (instead of looping forever or failing the whole parse), then enforce their minimum count
 - Guard UTF-8 boundary handling and byte offsets carefully
 - Add property-based tests/fuzzing for malformed UTF-8 and adversarial inputs
 - Establish panic-free APIs for parsing failures (use typed errors)

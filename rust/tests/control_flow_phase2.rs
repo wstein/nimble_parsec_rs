@@ -1,6 +1,6 @@
 use nimble_parsec_rs::{
-    ascii_char, concat, integer_min, lookahead, lookahead_not, repeat_while, string, times,
-    AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
+    ascii_char, concat, integer_min, lookahead, lookahead_not, optional, repeat_while, string,
+    times, AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
 };
 use num_bigint::BigInt;
 
@@ -69,6 +69,23 @@ fn times_respects_min_and_max() {
     let ok = parser.parse("12345").expect("times should parse");
     assert_eq!(ok.tokens, vec![ch('1'), ch('2'), ch('3'), ch('4')]);
     assert_eq!(ok.rest, "5");
+}
+
+#[test]
+fn repeat_while_stops_on_non_consuming_match() {
+    // optional consumes nothing when it cannot match; the loop must terminate
+    // even though the while predicate keeps saying Cont.
+    let parser = repeat_while(
+        optional(string("x")),
+        |_, _| RepeatWhileControl::Cont,
+        0,
+        None,
+    );
+    let ok = parser
+        .parse("yyy")
+        .expect("non-consuming match should stop");
+    assert!(ok.tokens.is_empty());
+    assert_eq!(ok.rest, "yyy");
 }
 
 #[test]

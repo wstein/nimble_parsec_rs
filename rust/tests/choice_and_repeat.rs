@@ -1,4 +1,6 @@
-use nimble_parsec_rs::{ascii_char, choice, concat, repeat, AsciiPredicate, Value};
+use nimble_parsec_rs::{
+    ascii_char, choice, concat, optional, repeat, string, AsciiPredicate, Value,
+};
 use num_bigint::BigInt;
 
 fn ch(c: char) -> Value {
@@ -30,6 +32,24 @@ fn ascii_predicates_support_negative_constraints() {
 
     assert!(parser.parse("7x").is_ok());
     assert!(parser.parse("3x").is_err());
+}
+
+#[test]
+fn repeat_stops_on_non_consuming_match() {
+    // optional always succeeds; on input it cannot match it consumes nothing,
+    // so repeat must stop rather than loop forever or fail.
+    let parser = repeat(optional(string("x")), 0, None);
+    let ok = parser
+        .parse("yyy")
+        .expect("non-consuming match should stop");
+    assert!(ok.tokens.is_empty());
+    assert_eq!(ok.rest, "yyy");
+}
+
+#[test]
+fn repeat_enforces_minimum_after_non_consuming_stop() {
+    let parser = repeat(optional(string("x")), 1, None);
+    assert!(parser.parse("yyy").is_err());
 }
 
 fn string_foo() -> nimble_parsec_rs::Parser {

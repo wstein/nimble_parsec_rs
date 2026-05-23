@@ -368,6 +368,12 @@ pub fn choice(parsers: Vec<Parser>) -> Parser {
     })
 }
 
+/// Applies `parser` between `min` and `max` (inclusive) times.
+///
+/// A successful iteration that consumes no input ends the repetition rather
+/// than looping forever: earlier iterations are kept and the `min` bound is
+/// still enforced afterwards. This favors making progress over failing the
+/// whole parse, while still guaranteeing termination.
 pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
     Parser::new(move |input, cursor| {
         let mut rest = input;
@@ -385,11 +391,8 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
             match parser.run(rest, cur) {
                 Ok(ok) => {
                     if ok.rest.len() == rest.len() {
-                        return Err(ParseFailure {
-                            reason: "repeat parser consumed no input".to_string(),
-                            rest,
-                            cursor: cur,
-                        });
+                        // No input consumed: stop instead of spinning forever.
+                        break;
                     }
                     tokens.extend(ok.tokens);
                     rest = ok.rest;
@@ -403,6 +406,14 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
                     break;
                 }
             }
+        }
+
+        if count < min {
+            return Err(ParseFailure {
+                reason: "repeat did not reach minimum repetitions".to_string(),
+                rest,
+                cursor: cur,
+            });
         }
 
         Ok(ParseSuccess {
@@ -454,6 +465,12 @@ pub fn lookahead_not(parser: Parser) -> Parser {
     })
 }
 
+/// Applies `parser` while `while_fn` returns [`RepeatWhileControl::Cont`],
+/// between `min` and `max` (inclusive) times.
+///
+/// Like [`repeat`], a successful iteration that consumes no input ends the
+/// repetition instead of looping forever; the `min` bound is enforced once the
+/// loop stops.
 pub fn repeat_while<F>(parser: Parser, while_fn: F, min: usize, max: Option<usize>) -> Parser
 where
     F: Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync + 'static,
@@ -479,11 +496,8 @@ where
             match parser.run(rest, cur) {
                 Ok(ok) => {
                     if ok.rest.len() == rest.len() {
-                        return Err(ParseFailure {
-                            reason: "repeat_while parser consumed no input".to_string(),
-                            rest,
-                            cursor: cur,
-                        });
+                        // No input consumed: stop instead of spinning forever.
+                        break;
                     }
                     tokens.extend(ok.tokens);
                     rest = ok.rest;
