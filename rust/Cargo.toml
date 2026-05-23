@@ -1,0 +1,12 @@
+[package]
+name = "nimble_parsec_rs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Phase-1 Rust port of NimbleParsec combinators"
+
+[lib]
+name = "nimble_parsec_rs"
+path = "src/lib.rs"
+
+[dependencies]

@@ -30,6 +30,16 @@ The goal of this library is to focus on a set of primitives for writing
 efficient parser combinators. The composition aspect means you should be
 able to use those primitives to implement higher level combinators.
 
+## Rust migration (PoC)
+
+This repository now includes an incremental Rust port in [rust/](rust/).
+The migration review and phased plan are documented in
+[MIGRATION_REVIEW.md](MIGRATION_REVIEW.md).
+
+Current Rust scope is intentionally limited to runtime combinator parity for
+selected integration scenarios, with compile-time codegen parity planned as
+a later phase.
+
 Note this library does not handle low-level binary parsing. In such cases,
 we recommend using [Elixir's bitstring syntax](https://hexdocs.pm/elixir/Kernel.SpecialForms.html#%3C%3C%3E%3E/1).
 
