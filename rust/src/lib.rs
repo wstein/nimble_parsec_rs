@@ -150,8 +150,7 @@ pub fn ignore(parser: Parser) -> Parser {
 
 pub fn string(lit: &'static str) -> Parser {
     Parser::new(move |input, cursor| {
-        if input.starts_with(lit) {
-            let rest = &input[lit.len()..];
+        if let Some(rest) = input.strip_prefix(lit) {
             let cursor = advance(cursor, lit);
             Ok(ParseSuccess {
                 tokens: vec![Value::Str(lit.to_string())],
@@ -207,11 +206,10 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
 
 pub fn utf8_string(min: usize, max: Option<usize>) -> Parser {
     Parser::new(move |input, cursor| {
-        let mut chars = input.char_indices();
         let mut consumed_end = 0;
         let mut taken = 0usize;
 
-        while let Some((idx, ch)) = chars.next() {
+        for (idx, ch) in input.char_indices() {
             if let Some(max) = max {
                 if taken >= max {
                     break;
