@@ -25,10 +25,10 @@ impl Default for Cursor {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     /// An arbitrary-precision integer, mirroring NimbleParsec's BEAM integers,
-    /// which are unbounded. Produced by the `integer` combinators.
+    /// which are unbounded. Produced by the `integer` and `ascii_char`
+    /// combinators (the latter emits the matched byte as its codepoint).
     Int(BigInt),
     Str(String),
-    Char(char),
     Tagged(String, Vec<Value>),
 }
 
@@ -198,7 +198,7 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
         let rest = &input[1..];
         let cursor = advance(cursor, consumed);
         Ok(ParseSuccess {
-            tokens: vec![Value::Char(char::from(b))],
+            tokens: vec![Value::Int(BigInt::from(b))],
             rest,
             cursor,
         })

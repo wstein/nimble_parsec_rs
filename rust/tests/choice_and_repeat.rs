@@ -1,19 +1,22 @@
 use nimble_parsec_rs::{ascii_char, choice, concat, repeat, AsciiPredicate, Value};
+use num_bigint::BigInt;
+
+fn ch(c: char) -> Value {
+    Value::Int(BigInt::from(c as u32))
+}
 
 #[test]
 fn choice_and_repeat_basics() {
     let letter = ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]);
-    let parser = concat(choice(vec![string_foo(), string_bar()]), repeat(letter, 1, Some(3)));
+    let parser = concat(
+        choice(vec![string_foo(), string_bar()]),
+        repeat(letter, 1, Some(3)),
+    );
 
     let ok = parser.parse("fooxyz!").expect("choice+repeat should parse");
     assert_eq!(
         ok.tokens,
-        vec![
-            Value::Str("foo".to_string()),
-            Value::Char('x'),
-            Value::Char('y'),
-            Value::Char('z')
-        ]
+        vec![Value::Str("foo".to_string()), ch('x'), ch('y'), ch('z')]
     );
     assert_eq!(ok.rest, "!");
 }

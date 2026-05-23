@@ -1,13 +1,14 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use nimble_parsec_rs::{
-    ascii_char, compile_parser, concat, ignore, integer_exact, AsciiPredicate,
-};
+use nimble_parsec_rs::{ascii_char, compile_parser, concat, ignore, integer_exact, AsciiPredicate};
 
 fn build_runtime_parser() -> nimble_parsec_rs::Parser {
     let date = concat(
         concat(
             integer_exact(4),
-            concat(ignore(nimble_parsec_rs::string("-")), concat(integer_exact(2), ignore(nimble_parsec_rs::string("-")))),
+            concat(
+                ignore(nimble_parsec_rs::string("-")),
+                concat(integer_exact(2), ignore(nimble_parsec_rs::string("-"))),
+            ),
         ),
         integer_exact(2),
     );
@@ -16,7 +17,10 @@ fn build_runtime_parser() -> nimble_parsec_rs::Parser {
         integer_exact(2),
         concat(
             ignore(nimble_parsec_rs::string(":")),
-            concat(integer_exact(2), concat(ignore(nimble_parsec_rs::string(":")), integer_exact(2))),
+            concat(
+                integer_exact(2),
+                concat(ignore(nimble_parsec_rs::string(":")), integer_exact(2)),
+            ),
         ),
     );
 
@@ -28,7 +32,10 @@ fn build_macro_parser() -> nimble_parsec_rs::Parser {
         concat(
             concat(
                 integer_exact(4),
-                concat(ignore(nimble_parsec_rs::string("-")), concat(integer_exact(2), ignore(nimble_parsec_rs::string("-"))))
+                concat(
+                    ignore(nimble_parsec_rs::string("-")),
+                    concat(integer_exact(2), ignore(nimble_parsec_rs::string("-")))
+                )
             ),
             integer_exact(2)
         ),
@@ -38,7 +45,10 @@ fn build_macro_parser() -> nimble_parsec_rs::Parser {
                 integer_exact(2),
                 concat(
                     ignore(nimble_parsec_rs::string(":")),
-                    concat(integer_exact(2), concat(ignore(nimble_parsec_rs::string(":")), integer_exact(2)))
+                    concat(
+                        integer_exact(2),
+                        concat(ignore(nimble_parsec_rs::string(":")), integer_exact(2))
+                    )
                 )
             )
         )

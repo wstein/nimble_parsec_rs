@@ -12,12 +12,13 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `concat`
   - `ignore`
   - `string`
-  - `ascii_char` with positive and negative predicates
+  - `ascii_char` with positive and negative predicates (emits the matched byte as an integer codepoint, like NimbleParsec)
   - `utf8_string(min, max)`
   - `integer_exact`, `integer_min`, `integer_range` (arbitrary precision, matching NimbleParsec's unbounded BEAM integers)
   - `optional`
   - `choice`
-  - `repeat(min, max)`
+  - `repeat(min, max)`, `repeat_while`, `times`
+  - `lookahead`, `lookahead_not`
   - `map`
   - `tag`
 
@@ -38,8 +39,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
 
 - Compile-time parser generation equivalent to `defparsec/defcombinator`
 - `post_traverse`, `pre_traverse`
-- `lookahead` and `lookahead_not`
-- `repeat_while`, `times` options parity
+- `utf8_char` and codepoint-range filtering for `utf8_string`
 - `parsec` (local/remote combinator references)
 - Generator support (`generate/1`) and metadata export
 - Error message parity with NimbleParsec's detailed labels

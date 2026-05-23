@@ -2,6 +2,11 @@ use nimble_parsec_rs::{
     ascii_char, concat, integer_min, lookahead, lookahead_not, repeat_while, string, times,
     AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
 };
+use num_bigint::BigInt;
+
+fn ch(c: char) -> Value {
+    Value::Int(BigInt::from(c as u32))
+}
 
 #[test]
 fn lookahead_matches_without_consuming() {
@@ -11,7 +16,7 @@ fn lookahead_matches_without_consuming() {
     );
 
     let ok = parser.parse("a0").expect("lookahead should pass");
-    assert_eq!(ok.tokens, vec![Value::Char('a')]);
+    assert_eq!(ok.tokens, vec![ch('a')]);
     assert_eq!(ok.rest, "0");
     assert_eq!(ok.cursor.byte_offset, 1);
 }
@@ -24,7 +29,7 @@ fn lookahead_not_matches_when_inner_fails() {
     );
 
     let ok = parser.parse("aa").expect("lookahead_not should pass");
-    assert_eq!(ok.tokens, vec![Value::Char('a')]);
+    assert_eq!(ok.tokens, vec![ch('a')]);
     assert_eq!(ok.rest, "a");
     assert_eq!(ok.cursor.byte_offset, 1);
 
@@ -50,7 +55,7 @@ fn repeat_while_stops_on_predicate() {
     );
 
     let ok = parser.parse("12345").expect("repeat_while should parse");
-    assert_eq!(ok.tokens, vec![Value::Char('1'), Value::Char('2')]);
+    assert_eq!(ok.tokens, vec![ch('1'), ch('2')]);
     assert_eq!(ok.rest, "345");
 }
 
@@ -62,15 +67,7 @@ fn times_respects_min_and_max() {
     );
 
     let ok = parser.parse("12345").expect("times should parse");
-    assert_eq!(
-        ok.tokens,
-        vec![
-            Value::Char('1'),
-            Value::Char('2'),
-            Value::Char('3'),
-            Value::Char('4')
-        ]
-    );
+    assert_eq!(ok.tokens, vec![ch('1'), ch('2'), ch('3'), ch('4')]);
     assert_eq!(ok.rest, "5");
 }
 

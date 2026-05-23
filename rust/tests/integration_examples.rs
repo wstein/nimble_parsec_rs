@@ -67,11 +67,11 @@ fn signed_int_with_optional_sign_and_tag() {
     let sign = optional(ascii_char(vec![AsciiPredicate::Char(b'-')]));
     let core = concat(sign, integer_min(1));
 
-    let mapped = map(core, |tokens| {
-        if let [Value::Char('-'), Value::Int(v)] = tokens.as_slice() {
-            return vec![Value::Int(-v)];
+    let mapped = map(core, |tokens| match tokens.as_slice() {
+        [Value::Int(sign), Value::Int(v)] if *sign == BigInt::from(b'-') => {
+            vec![Value::Int(-v)]
         }
-        tokens
+        _ => tokens,
     });
 
     let parser = tag("signed_int", mapped);
