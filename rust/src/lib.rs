@@ -1,6 +1,8 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
+pub use nimble_parsec_rs_macro::compile_parser;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub line: usize,

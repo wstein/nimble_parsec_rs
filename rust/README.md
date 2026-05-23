@@ -6,6 +6,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
 ## Implemented in Phase 1
 
 - Core parser runtime with line/byte cursor tracking
+- Proc-macro scaffold (`compile_parser!`) for compile-time parser expressions
 - Combinators:
   - `empty`
   - `concat`
@@ -19,6 +20,19 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `repeat(min, max)`
   - `map`
   - `tag`
+
+  ## Benchmark scaffold
+
+  Criterion benchmarks are available in [benches/parser_bench.rs](benches/parser_bench.rs):
+
+  - `runtime_builder_parse_datetime`
+  - `proc_macro_builder_parse_datetime`
+
+  Run:
+
+  ```bash
+  cargo bench
+  ```
 
 ## Not Yet Ported
 

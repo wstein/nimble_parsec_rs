@@ -10,3 +10,11 @@ name = "nimble_parsec_rs"
 path = "src/lib.rs"
 
 [dependencies]
+nimble_parsec_rs_macro = { path = "parsec_macro" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "parser_bench"
+harness = false
