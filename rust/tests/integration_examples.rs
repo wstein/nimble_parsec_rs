@@ -54,7 +54,7 @@ fn iso_datetime_no_timezone_like_integration_test() {
 
 #[test]
 fn markdown_h1_like_integration_test() {
-    let parser = concat(ignore(string("#")), utf8_string(1, None));
+    let parser = concat(ignore(string("#")), utf8_string(vec![], 1, None));
     let ok = parser.parse("# Heading").expect("parser should succeed");
 
     assert_eq!(ok.tokens, vec![Value::Str(" Heading".to_string())]);

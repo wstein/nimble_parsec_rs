@@ -81,6 +81,18 @@ pub enum AsciiPredicate {
     NotChar(u8),
 }
 
+/// Codepoint membership constraints for `utf8_char` and `utf8_string`,
+/// mirroring NimbleParsec's range list (`min..max`, a codepoint, or their
+/// `{:not, ...}` negations). An empty set accepts any codepoint.
+#[derive(Clone, Debug)]
+pub enum Utf8Predicate {
+    Any,
+    Range(RangeInclusive<char>),
+    Char(char),
+    NotRange(RangeInclusive<char>),
+    NotChar(char),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimesOptions {
     pub min: usize,
@@ -204,7 +216,36 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
     })
 }
 
-pub fn utf8_string(min: usize, max: Option<usize>) -> Parser {
+pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
+    Parser::new(move |input, cursor| {
+        let Some(ch) = input.chars().next() else {
+            return Err(ParseFailure {
+                reason: "expected utf8 codepoint".to_string(),
+                rest: input,
+                cursor,
+            });
+        };
+
+        if !matches_utf8(ch, &predicates) {
+            return Err(ParseFailure {
+                reason: "expected utf8 codepoint in allowed range".to_string(),
+                rest: input,
+                cursor,
+            });
+        }
+
+        let consumed = &input[..ch.len_utf8()];
+        let rest = &input[ch.len_utf8()..];
+        let cursor = advance(cursor, consumed);
+        Ok(ParseSuccess {
+            tokens: vec![Value::Int(BigInt::from(ch as u32))],
+            rest,
+            cursor,
+        })
+    })
+}
+
+pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize>) -> Parser {
     Parser::new(move |input, cursor| {
         let mut consumed_end = 0;
         let mut taken = 0usize;
@@ -214,6 +255,10 @@ pub fn utf8_string(min: usize, max: Option<usize>) -> Parser {
                 if taken >= max {
                     break;
                 }
+            }
+
+            if !matches_utf8(ch, &predicates) {
+                break;
             }
 
             consumed_end = idx + ch.len_utf8();
@@ -490,36 +535,46 @@ pub fn tag(name: &'static str, parser: Parser) -> Parser {
     })
 }
 
-fn matches_ascii(b: u8, predicates: &[AsciiPredicate]) -> bool {
-    if predicates.is_empty() {
-        return true;
+/// Shared positive/negative membership rule for character predicates.
+///
+/// Each item is `(is_negative, contains)`. A value is accepted when it hits at
+/// least one positive predicate (or there are none) and no negative predicate.
+/// An empty set therefore accepts any value, matching NimbleParsec's `[]`.
+fn matches_ranges(predicates: impl IntoIterator<Item = (bool, bool)>) -> bool {
+    let mut has_positive = false;
+    let mut positive_hit = false;
+    let mut negative_hit = false;
+
+    for (is_negative, contains) in predicates {
+        if is_negative {
+            negative_hit |= contains;
+        } else {
+            has_positive = true;
+            positive_hit |= contains;
+        }
     }
 
-    let has_positive = predicates.iter().any(|p| {
-        matches!(
-            p,
-            AsciiPredicate::Any | AsciiPredicate::Range(_) | AsciiPredicate::Char(_)
-        )
-    });
+    (!has_positive || positive_hit) && !negative_hit
+}
 
-    let positive_match = if has_positive {
-        predicates.iter().any(|p| match p {
-            AsciiPredicate::Any => true,
-            AsciiPredicate::Range(r) => r.contains(&b),
-            AsciiPredicate::Char(c) => *c == b,
-            AsciiPredicate::NotRange(_) | AsciiPredicate::NotChar(_) => false,
-        })
-    } else {
-        true
-    };
+fn matches_ascii(b: u8, predicates: &[AsciiPredicate]) -> bool {
+    matches_ranges(predicates.iter().map(|p| match p {
+        AsciiPredicate::Any => (false, true),
+        AsciiPredicate::Range(r) => (false, r.contains(&b)),
+        AsciiPredicate::Char(c) => (false, *c == b),
+        AsciiPredicate::NotRange(r) => (true, r.contains(&b)),
+        AsciiPredicate::NotChar(c) => (true, *c == b),
+    }))
+}
 
-    let negative_match = predicates.iter().any(|p| match p {
-        AsciiPredicate::NotRange(r) => r.contains(&b),
-        AsciiPredicate::NotChar(c) => *c == b,
-        AsciiPredicate::Any | AsciiPredicate::Range(_) | AsciiPredicate::Char(_) => false,
-    });
-
-    positive_match && !negative_match
+fn matches_utf8(ch: char, predicates: &[Utf8Predicate]) -> bool {
+    matches_ranges(predicates.iter().map(|p| match p {
+        Utf8Predicate::Any => (false, true),
+        Utf8Predicate::Range(r) => (false, r.contains(&ch)),
+        Utf8Predicate::Char(c) => (false, *c == ch),
+        Utf8Predicate::NotRange(r) => (true, r.contains(&ch)),
+        Utf8Predicate::NotChar(c) => (true, *c == ch),
+    }))
 }
 
 fn advance(cursor: Cursor, consumed: &str) -> Cursor {
