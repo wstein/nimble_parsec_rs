@@ -14,7 +14,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `string`
   - `ascii_char` with positive and negative predicates
   - `utf8_string(min, max)`
-  - `integer_exact`, `integer_min`, `integer_range`
+  - `integer_exact`, `integer_min`, `integer_range` (arbitrary precision, matching NimbleParsec's unbounded BEAM integers)
   - `optional`
   - `choice`
   - `repeat(min, max)`

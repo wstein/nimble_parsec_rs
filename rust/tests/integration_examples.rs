@@ -1,14 +1,22 @@
 use nimble_parsec_rs::{
-    ascii_char, concat, ignore, integer_exact, integer_min, map, optional, tag, string,
+    ascii_char, concat, ignore, integer_exact, integer_min, map, optional, string, tag,
     utf8_string, AsciiPredicate, Cursor, Value,
 };
+use num_bigint::BigInt;
+
+fn int(n: i64) -> Value {
+    Value::Int(BigInt::from(n))
+}
 
 #[test]
 fn iso_datetime_no_timezone_like_integration_test() {
     let date = concat(
         concat(
             integer_exact(4),
-            concat(ignore(string("-")), concat(integer_exact(2), ignore(string("-")))),
+            concat(
+                ignore(string("-")),
+                concat(integer_exact(2), ignore(string("-"))),
+            ),
         ),
         integer_exact(2),
     );
@@ -17,23 +25,21 @@ fn iso_datetime_no_timezone_like_integration_test() {
         integer_exact(2),
         concat(
             ignore(string(":")),
-            concat(integer_exact(2), concat(ignore(string(":")), integer_exact(2))),
+            concat(
+                integer_exact(2),
+                concat(ignore(string(":")), integer_exact(2)),
+            ),
         ),
     );
 
     let parser = concat(date, concat(ignore(string("T")), time));
-    let ok = parser.parse("2010-04-17T14:12:34").expect("parser should succeed");
+    let ok = parser
+        .parse("2010-04-17T14:12:34")
+        .expect("parser should succeed");
 
     assert_eq!(
         ok.tokens,
-        vec![
-            Value::Int(2010),
-            Value::Int(4),
-            Value::Int(17),
-            Value::Int(14),
-            Value::Int(12),
-            Value::Int(34)
-        ]
+        vec![int(2010), int(4), int(17), int(14), int(12), int(34)]
     );
     assert_eq!(ok.rest, "");
     assert_eq!(
@@ -62,12 +68,8 @@ fn signed_int_with_optional_sign_and_tag() {
     let core = concat(sign, integer_min(1));
 
     let mapped = map(core, |tokens| {
-        if tokens.len() == 2 {
-            if matches!(tokens[0], Value::Char('-')) {
-                if let Value::Int(v) = tokens[1] {
-                    return vec![Value::Int(-v)];
-                }
-            }
+        if let [Value::Char('-'), Value::Int(v)] = tokens.as_slice() {
+            return vec![Value::Int(-v)];
         }
         tokens
     });
@@ -77,12 +79,12 @@ fn signed_int_with_optional_sign_and_tag() {
     let ok_neg = parser.parse("-1").expect("negative should parse");
     assert_eq!(
         ok_neg.tokens,
-        vec![Value::Tagged("signed_int".to_string(), vec![Value::Int(-1)])]
+        vec![Value::Tagged("signed_int".to_string(), vec![int(-1)])]
     );
 
     let ok_pos = parser.parse("42").expect("positive should parse");
     assert_eq!(
         ok_pos.tokens,
-        vec![Value::Tagged("signed_int".to_string(), vec![Value::Int(42)])]
+        vec![Value::Tagged("signed_int".to_string(), vec![int(42)])]
     );
 }

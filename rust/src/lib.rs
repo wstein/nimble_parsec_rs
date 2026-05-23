@@ -1,6 +1,8 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
+use num_bigint::BigInt;
+
 pub use nimble_parsec_rs_macro::compile_parser;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +24,9 @@ impl Default for Cursor {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    Int(i64),
+    /// An arbitrary-precision integer, mirroring NimbleParsec's BEAM integers,
+    /// which are unbounded. Produced by the `integer` combinators.
+    Int(BigInt),
     Str(String),
     Char(char),
     Tagged(String, Vec<Value>),
@@ -276,11 +280,11 @@ pub fn integer_range(min: usize, max: Option<usize>) -> Parser {
         let consumed = &input[..i];
         let rest = &input[i..];
         let cursor = advance(cursor, consumed);
-        let value = consumed.parse::<i64>().map_err(|_| ParseFailure {
-            reason: "integer conversion failed".to_string(),
-            rest: input,
-            cursor,
-        })?;
+        // `consumed` is a non-empty run of ASCII digits, so parsing into an
+        // arbitrary-precision integer is infallible and never overflows.
+        let value = consumed
+            .parse::<BigInt>()
+            .expect("digit run is a valid integer");
 
         Ok(ParseSuccess {
             tokens: vec![Value::Int(value)],

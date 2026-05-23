@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 nimble_parsec_rs_macro = { path = "parsec_macro" }
+num-bigint = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"
