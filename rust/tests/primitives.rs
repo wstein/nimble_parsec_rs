@@ -1,4 +1,25 @@
-use nimble_parsec_rs::{ascii_string, bytes, concat, eos, string, AsciiPredicate, Value};
+use nimble_parsec_rs::{
+    ascii_string, bytes, concat, eos, integer_min, string, tag, AsciiPredicate, Value,
+};
+use num_bigint::BigInt;
+
+#[test]
+fn string_and_tag_accept_runtime_strings() {
+    // Computed at runtime — not a &'static str literal.
+    let prefix = format!("{}-{}", "foo", "bar");
+    let parser = string(prefix);
+    assert_eq!(parser.parse("foo-bar!").expect("parses").rest, "!");
+
+    let name = String::from("dynamic");
+    let tagged = tag(name, integer_min(1));
+    assert_eq!(
+        tagged.parse("42").expect("parses").tokens,
+        vec![Value::Tagged(
+            "dynamic".to_string(),
+            vec![Value::Int(BigInt::from(42))]
+        )]
+    );
+}
 
 #[test]
 fn ascii_string_collects_in_range_bytes() {

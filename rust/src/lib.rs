@@ -116,7 +116,7 @@ type NativeFn = dyn for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Se
 enum Ast {
     Empty,
     Fail(&'static str),
-    Str(&'static str),
+    Str(Arc<str>),
     AsciiChar {
         predicates: Vec<AsciiPredicate>,
         reason: String,
@@ -165,11 +165,11 @@ enum Ast {
     },
     Map(Arc<Ast>, Arc<MapFn>),
     Reduce(Arc<Ast>, Arc<ReduceFn>),
-    Tag(&'static str, Arc<Ast>),
-    UnwrapAndTag(&'static str, Arc<Ast>),
+    Tag(Arc<str>, Arc<Ast>),
+    UnwrapAndTag(Arc<str>, Arc<Ast>),
     Wrap(Arc<Ast>),
     Replace(Arc<Ast>, Value),
-    Label(Arc<Ast>, &'static str),
+    Label(Arc<Ast>, Arc<str>),
     ByteOffset(Arc<Ast>),
     Line(Arc<Ast>),
     Debug(Arc<Ast>),
@@ -312,12 +312,12 @@ impl Parser {
     }
 
     /// Tags the result tokens. See [`tag`].
-    pub fn tagged(self, name: &'static str) -> Parser {
+    pub fn tagged(self, name: impl Into<Arc<str>>) -> Parser {
         tag(name, self)
     }
 
     /// Tags a single result token. See [`unwrap_and_tag`].
-    pub fn unwrap_and_tagged(self, name: &'static str) -> Parser {
+    pub fn unwrap_and_tagged(self, name: impl Into<Arc<str>>) -> Parser {
         unwrap_and_tag(name, self)
     }
 
@@ -332,7 +332,7 @@ impl Parser {
     }
 
     /// Overrides the failure message. See [`label`].
-    pub fn labelled(self, label_text: &'static str) -> Parser {
+    pub fn labelled(self, label_text: impl Into<Arc<str>>) -> Parser {
         label(self, label_text)
     }
 }
@@ -518,9 +518,10 @@ pub fn ignore(parser: Parser) -> Parser {
     Parser::from_ast(Ast::Ignore(parser.ast))
 }
 
-/// Matches the literal `lit`, emitting it as a [`Value::Str`].
-pub fn string(lit: &'static str) -> Parser {
-    Parser::from_ast(Ast::Str(lit))
+/// Matches the literal `lit`, emitting it as a [`Value::Str`]. Accepts any
+/// `Into<Arc<str>>`, so runtime-computed strings work, not just `&'static str`.
+pub fn string(lit: impl Into<Arc<str>>) -> Parser {
+    Parser::from_ast(Ast::Str(lit.into()))
 }
 
 /// Matches one ASCII byte satisfying `predicates`, emitting its codepoint as a
@@ -714,14 +715,14 @@ where
 }
 
 /// Wraps `parser`'s result tokens in a single [`Value::Tagged`] under `name`.
-pub fn tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::from_ast(Ast::Tag(name, parser.ast))
+pub fn tag(name: impl Into<Arc<str>>, parser: Parser) -> Parser {
+    Parser::from_ast(Ast::Tag(name.into(), parser.ast))
 }
 
 /// Tags a single result token, like NimbleParsec's `unwrap_and_tag`. Fails if
 /// the combinator does not emit exactly one token.
-pub fn unwrap_and_tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::from_ast(Ast::UnwrapAndTag(name, parser.ast))
+pub fn unwrap_and_tag(name: impl Into<Arc<str>>, parser: Parser) -> Parser {
+    Parser::from_ast(Ast::UnwrapAndTag(name.into(), parser.ast))
 }
 
 /// Wraps all result tokens into a single list value, like NimbleParsec's `wrap`.
@@ -738,8 +739,8 @@ pub fn replace(parser: Parser, value: Value) -> Parser {
 /// Replaces the failure message of `parser` with `expected <label>`, like
 /// NimbleParsec's `label`. The failure position is preserved; success passes
 /// through unchanged.
-pub fn label(parser: Parser, label: &'static str) -> Parser {
-    Parser::from_ast(Ast::Label(parser.ast, label))
+pub fn label(parser: Parser, label: impl Into<Arc<str>>) -> Parser {
+    Parser::from_ast(Ast::Label(parser.ast, label.into()))
 }
 
 /// Wraps `parser`'s results with the trailing byte offset, like NimbleParsec's
@@ -801,9 +802,9 @@ fn run_ast<'a>(
         }),
 
         Ast::Str(lit) => {
-            if let Some(rest) = input.strip_prefix(*lit) {
+            if let Some(rest) = input.strip_prefix(lit.as_ref()) {
                 Ok(ParseSuccess {
-                    tokens: vec![Value::Str((*lit).to_string())],
+                    tokens: vec![Value::Str(lit.to_string())],
                     rest,
                     cursor: advance(cursor, lit),
                     context,
