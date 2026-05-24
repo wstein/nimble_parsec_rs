@@ -18,6 +18,7 @@
 //! assert_eq!(ok.tokens, vec![Value::Int(BigInt::from(b'a')), Value::Int(BigInt::from(42))]);
 //! assert_eq!(ok.rest, "");
 //! ```
+#![deny(missing_docs)]
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -31,10 +32,15 @@ pub use nimble_parsec_rs_macro::{
     compile_parser, defcombinator, defcombinatorp, defparsec, defparsecp,
 };
 
+/// Position within the input, tracked as the parse advances. Column is
+/// derivable as `byte_offset - line_start_offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
+    /// 1-based line number.
     pub line: usize,
+    /// Byte offset of the start of the current line.
     pub line_start_offset: usize,
+    /// Byte offset from the start of the input.
     pub byte_offset: usize,
 }
 
@@ -48,6 +54,7 @@ impl Default for Cursor {
     }
 }
 
+/// A parsed result token. Mirrors the terms NimbleParsec emits.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
@@ -72,18 +79,27 @@ pub enum Value {
 /// own context, so [`ParseFailure`] does not carry one.
 pub type Context = HashMap<String, Value>;
 
+/// A successful parse: the emitted tokens and where parsing stopped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseSuccess<'a> {
+    /// The values the parser emitted.
     pub tokens: Vec<Value>,
+    /// The unconsumed remainder of the input.
     pub rest: &'a str,
+    /// Position after the consumed input.
     pub cursor: Cursor,
+    /// The threaded user context after the parse.
     pub context: Context,
 }
 
+/// A failed parse: why it failed and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseFailure<'a> {
+    /// Human-readable failure message.
     pub reason: String,
+    /// The input at the point of failure.
     pub rest: &'a str,
+    /// Position at the point of failure.
     pub cursor: Cursor,
 }
 
@@ -99,6 +115,7 @@ impl std::fmt::Display for ParseFailure<'_> {
 
 impl std::error::Error for ParseFailure<'_> {}
 
+/// The result of running a [`Parser`]: [`ParseSuccess`] or [`ParseFailure`].
 pub type ParseResult<'a> = Result<ParseSuccess<'a>, ParseFailure<'a>>;
 
 type MapFn = dyn Fn(Value) -> Value + Send + Sync;
@@ -237,6 +254,8 @@ impl std::fmt::Debug for Ast {
 }
 
 #[derive(Clone, Debug)]
+/// A composable, runnable parser. Build one with the combinator functions or
+/// the fluent methods, then run it with [`Parser::parse`].
 #[must_use = "a Parser does nothing unless run with `parse`/`run` or composed into another parser"]
 pub struct Parser {
     ast: Arc<Ast>,
@@ -353,6 +372,7 @@ pub struct ParserRef {
 }
 
 impl ParserRef {
+    /// Creates an undefined reference; call [`ParserRef::define`] before use.
     pub fn new() -> Self {
         Self::default()
     }
@@ -489,13 +509,17 @@ impl ClassElem for char {
     }
 }
 
+/// Repetition bounds for [`times`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimesOptions {
+    /// Minimum number of repetitions.
     pub min: usize,
+    /// Maximum number of repetitions, or `None` for unbounded.
     pub max: Option<usize>,
 }
 
 impl TimesOptions {
+    /// Exactly `n` repetitions.
     pub fn exact(n: usize) -> Self {
         Self {
             min: n,
@@ -503,6 +527,7 @@ impl TimesOptions {
         }
     }
 
+    /// Between `min` and `max` repetitions (inclusive).
     pub fn min_max(min: usize, max: usize) -> Self {
         Self {
             min,
@@ -510,14 +535,18 @@ impl TimesOptions {
         }
     }
 
+    /// At least `min` repetitions, unbounded above.
     pub fn min_only(min: usize) -> Self {
         Self { min, max: None }
     }
 }
 
+/// Controls whether [`repeat_while`] continues or stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepeatWhileControl {
+    /// Continue repeating.
     Cont,
+    /// Stop repeating.
     Halt,
 }
 
@@ -634,6 +663,7 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
     })
 }
 
+/// Repeats `parser` per [`TimesOptions`]; fails if `max < min`.
 pub fn times(parser: Parser, options: TimesOptions) -> Parser {
     if let Some(max) = options.max {
         if max < options.min {
