@@ -30,7 +30,7 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
   - `line`, `byte_offset` (position metadata)
   - `debug` (prints parser state to stderr)
   - `ParserRef` / `recursive` (forward references for recursive grammars)
-- `generate(&parser, seed)` produces a random accepted input (seeded; round-trips for non-recursive grammars)
+- `generate(&parser, seed)` produces a random accepted input (seeded; round-trips for non-recursive grammars); `generate_with(&parser, seed, GenerateConfig { .. })` tunes recursion depth and the repeat window
 
   ## Benchmark scaffold
 

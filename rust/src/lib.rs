@@ -257,14 +257,40 @@ where
     reference.parser()
 }
 
+/// Tunes [`generate_with`].
+#[derive(Clone, Copy, Debug)]
+pub struct GenerateConfig {
+    /// Maximum reference-expansion depth before recursion stops, keeping
+    /// generation terminating on recursive grammars. Default 16.
+    pub max_recursion_depth: usize,
+    /// For unbounded repetitions (`max == None`), the random count is drawn from
+    /// `min..=min + repeat_window`. Default 3.
+    pub repeat_window: usize,
+}
+
+impl Default for GenerateConfig {
+    fn default() -> Self {
+        Self {
+            max_recursion_depth: 16,
+            repeat_window: 3,
+        }
+    }
+}
+
 /// Generates a random input string accepted by `parser`, seeded by `seed` for
 /// reproducibility, mirroring NimbleParsec's `generate`. For non-recursive
 /// grammars the result round-trips (it parses successfully). Recursion is
 /// depth-bounded so generation always terminates; zero-width assertions
-/// (`lookahead`/`lookahead_not`) and `repeat_while` predicates are best-effort.
+/// (`lookahead`/`lookahead_not`) contribute no input by design, and
+/// `repeat_while` sampling is best-effort because its predicate is opaque.
 pub fn generate(parser: &Parser, seed: u64) -> String {
+    generate_with(parser, seed, GenerateConfig::default())
+}
+
+/// Like [`generate`], but with a caller-supplied [`GenerateConfig`].
+pub fn generate_with(parser: &Parser, seed: u64, config: GenerateConfig) -> String {
     let mut rng = StdRng::seed_from_u64(seed);
-    generate_ast(&parser.ast, &mut rng, 0)
+    generate_ast(&parser.ast, &mut rng, 0, &config)
 }
 
 #[derive(Clone, Debug)]
@@ -1154,11 +1180,7 @@ fn run_ast<'a>(
     }
 }
 
-/// Recursion budget for `generate`: beyond this depth, recursive references
-/// stop expanding so generation always terminates.
-const GENERATE_DEPTH_LIMIT: usize = 16;
-
-fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
+fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize, config: &GenerateConfig) -> String {
     match ast.as_ref() {
         Ast::Empty | Ast::Fail(_) | Ast::Eos => String::new(),
 
@@ -1178,7 +1200,7 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
             max,
         } => {
             let mut out = String::new();
-            for _ in 0..gen_count(*min, *max, rng) {
+            for _ in 0..gen_count(*min, *max, rng, config) {
                 match gen_ascii_byte(predicates, rng) {
                     Some(b) => out.push(b as char),
                     None => break,
@@ -1193,7 +1215,7 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
             max,
         } => {
             let mut out = String::new();
-            for _ in 0..gen_count(*min, *max, rng) {
+            for _ in 0..gen_count(*min, *max, rng, config) {
                 match gen_utf8_char(predicates, rng) {
                     Some(c) => out.push(c),
                     None => break,
@@ -1208,14 +1230,14 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
 
         Ast::Integer { min, max } => {
             let lo = (*min).max(1);
-            let count = gen_count(lo, max.map(|m| m.max(lo)), rng).max(1);
+            let count = gen_count(lo, max.map(|m| m.max(lo)), rng, config).max(1);
             (0..count)
                 .map(|_| (b'0' + rng.gen_range(0..10)) as char)
                 .collect()
         }
 
         Ast::Concat(left, right) => {
-            generate_ast(left, rng, depth) + &generate_ast(right, rng, depth)
+            generate_ast(left, rng, depth, config) + &generate_ast(right, rng, depth, config)
         }
 
         Ast::Ignore(inner)
@@ -1231,13 +1253,14 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
         | Ast::Line(inner)
         | Ast::Debug(inner)
         | Ast::PostTraverse(inner, _)
-        | Ast::PreTraverse(inner, _) => generate_ast(inner, rng, depth),
+        | Ast::PreTraverse(inner, _) => generate_ast(inner, rng, depth, config),
 
+        // Zero-width assertions consume no input, so they contribute nothing.
         Ast::Lookahead(_) | Ast::LookaheadNot(_) => String::new(),
 
         Ast::Optional(inner) => {
-            if depth < GENERATE_DEPTH_LIMIT && rng.gen_bool(0.5) {
-                generate_ast(inner, rng, depth)
+            if depth < config.max_recursion_depth && rng.gen_bool(0.5) {
+                generate_ast(inner, rng, depth, config)
             } else {
                 String::new()
             }
@@ -1247,7 +1270,7 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
             if choices.is_empty() {
                 return String::new();
             }
-            let idx = if depth >= GENERATE_DEPTH_LIMIT {
+            let idx = if depth >= config.max_recursion_depth {
                 // Prefer a branch that cannot recurse, so generation terminates.
                 choices
                     .iter()
@@ -1256,13 +1279,13 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
             } else {
                 rng.gen_range(0..choices.len())
             };
-            generate_ast(&choices[idx], rng, depth)
+            generate_ast(&choices[idx], rng, depth, config)
         }
 
         Ast::Repeat { inner, min, max } => {
             let mut out = String::new();
-            for _ in 0..gen_count(*min, *max, rng) {
-                out.push_str(&generate_ast(inner, rng, depth));
+            for _ in 0..gen_count(*min, *max, rng, config) {
+                out.push_str(&generate_ast(inner, rng, depth, config));
             }
             out
         }
@@ -1270,26 +1293,29 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
         Ast::Duplicate { inner, n } => {
             let mut out = String::new();
             for _ in 0..*n {
-                out.push_str(&generate_ast(inner, rng, depth));
+                out.push_str(&generate_ast(inner, rng, depth, config));
             }
             out
         }
 
-        // The while predicate is opaque, so emit the minimum required count.
-        Ast::RepeatWhile { inner, min, .. } => {
+        // The while predicate is opaque, so a count above the minimum may parse
+        // short; this is best-effort sampling within the configured window.
+        Ast::RepeatWhile {
+            inner, min, max, ..
+        } => {
             let mut out = String::new();
-            for _ in 0..*min {
-                out.push_str(&generate_ast(inner, rng, depth));
+            for _ in 0..gen_count(*min, *max, rng, config) {
+                out.push_str(&generate_ast(inner, rng, depth, config));
             }
             out
         }
 
         Ast::Reference(cell) => {
-            if depth >= GENERATE_DEPTH_LIMIT {
+            if depth >= config.max_recursion_depth {
                 String::new()
             } else {
                 match cell.get() {
-                    Some(inner) => generate_ast(inner, rng, depth + 1),
+                    Some(inner) => generate_ast(inner, rng, depth + 1, config),
                     None => String::new(),
                 }
             }
@@ -1298,9 +1324,9 @@ fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
 }
 
 /// Chooses a repetition count within `[min, max]`, defaulting an unbounded
-/// `max` to a small window above `min`.
-fn gen_count(min: usize, max: Option<usize>, rng: &mut StdRng) -> usize {
-    let upper = max.unwrap_or(min + 3).max(min);
+/// `max` to `config.repeat_window` above `min`.
+fn gen_count(min: usize, max: Option<usize>, rng: &mut StdRng, config: &GenerateConfig) -> usize {
+    let upper = max.unwrap_or(min + config.repeat_window).max(min);
     if upper == min {
         min
     } else {
