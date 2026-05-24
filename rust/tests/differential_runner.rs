@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use nimble_parsec_rs::{
-    ascii_char, concat, ignore, integer_exact, integer_min, lookahead, repeat_while, string,
-    AsciiPredicate, RepeatWhileControl, Value,
+    ascii_char, ascii_string, concat, duplicate, ignore, integer_exact, integer_min, lookahead,
+    repeat_while, string, tag, wrap, AsciiPredicate, RepeatWhileControl, Value,
 };
 
 /// True when an Elixir `mix` is runnable, so the differential test can be
@@ -72,6 +72,41 @@ fn differential_runner_matches_shared_elixir_scenarios() {
             .get("repeat_while_digits")
             .expect("missing repeat_while_digits case"),
         &rust_repeat,
+    );
+
+    let rust_tagged = tag("n", integer_min(1)).parse("42").expect("tag parse");
+    assert_case(
+        elixir.get("tagged_int").expect("missing tagged_int case"),
+        &rust_tagged,
+    );
+
+    let rust_wrapped = wrap(concat(
+        integer_exact(2),
+        concat(ignore(string(",")), integer_exact(2)),
+    ))
+    .parse("12,34")
+    .expect("wrap parse");
+    assert_case(
+        elixir
+            .get("wrapped_pair")
+            .expect("missing wrapped_pair case"),
+        &rust_wrapped,
+    );
+
+    let rust_ascii = ascii_string(vec![AsciiPredicate::Range(b'a'..=b'z')], 1, None)
+        .parse("abc123")
+        .expect("ascii_string parse");
+    assert_case(
+        elixir.get("ascii_lower").expect("missing ascii_lower case"),
+        &rust_ascii,
+    );
+
+    let rust_dup = duplicate(string("ab"), 3)
+        .parse("ababab")
+        .expect("duplicate parse");
+    assert_case(
+        elixir.get("dup_ab").expect("missing dup_ab case"),
+        &rust_dup,
     );
 }
 
