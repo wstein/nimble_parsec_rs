@@ -228,6 +228,101 @@ impl Parser {
     }
 }
 
+/// Fluent, method-chaining alternative to the free combinator functions. Each
+/// method delegates to its free function (e.g. [`Parser::then`] to [`concat`]),
+/// so behavior is identical; pick whichever reads better at the call site.
+impl Parser {
+    /// Sequences `self` followed by `next`. See [`concat`].
+    #[must_use]
+    pub fn then(self, next: Parser) -> Parser {
+        concat(self, next)
+    }
+
+    /// Succeeds with `self`, or `alt` if `self` fails. See [`choice`].
+    #[must_use]
+    pub fn or(self, alt: Parser) -> Parser {
+        choice(vec![self, alt])
+    }
+
+    /// Discards `self`'s result tokens. See [`ignore`].
+    #[must_use]
+    pub fn ignored(self) -> Parser {
+        ignore(self)
+    }
+
+    /// Makes `self` optional. See [`optional`].
+    #[must_use]
+    pub fn optional(self) -> Parser {
+        optional(self)
+    }
+
+    /// Repeats `self` between `min` and `max` times. See [`repeat`].
+    #[must_use]
+    pub fn repeated(self, min: usize, max: Option<usize>) -> Parser {
+        repeat(self, min, max)
+    }
+
+    /// Repeats `self` per [`TimesOptions`]. See [`times`].
+    #[must_use]
+    pub fn times(self, options: TimesOptions) -> Parser {
+        times(self, options)
+    }
+
+    /// Parses `self` exactly `n` times in sequence. See [`duplicate`].
+    #[must_use]
+    pub fn duplicated(self, n: usize) -> Parser {
+        duplicate(self, n)
+    }
+
+    /// Maps each result token individually. See [`map`].
+    #[must_use]
+    pub fn map<F>(self, f: F) -> Parser
+    where
+        F: Fn(Value) -> Value + Send + Sync + 'static,
+    {
+        map(self, f)
+    }
+
+    /// Reduces all result tokens into one. See [`reduce`].
+    #[must_use]
+    pub fn reduce<F>(self, f: F) -> Parser
+    where
+        F: Fn(Vec<Value>) -> Value + Send + Sync + 'static,
+    {
+        reduce(self, f)
+    }
+
+    /// Tags the result tokens. See [`tag`].
+    #[must_use]
+    pub fn tagged(self, name: &'static str) -> Parser {
+        tag(name, self)
+    }
+
+    /// Tags a single result token. See [`unwrap_and_tag`].
+    #[must_use]
+    pub fn unwrap_and_tagged(self, name: &'static str) -> Parser {
+        unwrap_and_tag(name, self)
+    }
+
+    /// Wraps the result tokens in a single list value. See [`wrap`].
+    #[must_use]
+    pub fn wrapped(self) -> Parser {
+        wrap(self)
+    }
+
+    /// Replaces the result tokens with a constant. See [`replace`].
+    #[must_use]
+    pub fn replaced_with(self, value: Value) -> Parser {
+        replace(self, value)
+    }
+
+    /// Overrides the failure message. See [`label`].
+    #[must_use]
+    pub fn labelled(self, label_text: &'static str) -> Parser {
+        label(self, label_text)
+    }
+}
+
 /// A forward-declarable parser reference enabling recursive grammars, mirroring
 /// NimbleParsec's `parsec`. Create one, use [`ParserRef::parser`] inside a
 /// definition, then supply that definition with [`ParserRef::define`]. Cloning a
