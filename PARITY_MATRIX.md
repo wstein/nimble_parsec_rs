@@ -82,10 +82,32 @@ grammar is introspectable — which is what unblocked `generate`.
 
 The one remaining ❌ of substance is **compile-time code generation** (the
 `defparsec` family / specializing `compile_parser!`): emitting specialized Rust
-for a grammar at compile time, which is what gives NimbleParsec its performance.
-The AST makes this tractable, but it remains a proc-macro effort.
+for a grammar at compile time. The AST makes this tractable, but benchmarking
+(see "Codegen verdict" below) shows it is not the highest-leverage next step.
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
 runtime forward reference (`ParserRef`/`recursive`) rather than module-level
 named parsers, which belong with codegen.
+
+## Codegen verdict (measured)
+
+`rust/benches/parser_bench.rs` benchmarks the datetime grammar three ways
+(representative numbers on one machine — run `cargo bench` for your own):
+
+| Variant | Time | Notes |
+| --- | --- | --- |
+| Interpreter (combinators) | ~1.36 µs | current `Parser::parse` |
+| Hand-written, same tokens | ~0.42 µs | the *fair* codegen ceiling (still allocates the 6 `BigInt`s + `Vec`) |
+| Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
+
+A `compile_parser!` specializer must emit **identical tokens**, so its ceiling
+is the middle row, not the bottom. The ~0.9 µs gap between the interpreter and
+that ceiling is dominated by **avoidable allocations** — `string("-")` under
+`ignore` still allocates a `Value::Str` that is immediately discarded (7 such
+throwaways here), plus intermediate per-combinator `Vec`s — not by AST match
+dispatch. So the higher-leverage, lower-risk optimizations come first: teach
+`ignore` to suppress inner-token allocation, reduce intermediate `Vec`s, and
+consider a small-integer token representation. Codegen specialization is
+deferred: it carries high proc-macro complexity and token-divergence risk for a
+speedup an optimized interpreter would largely capture anyway.
