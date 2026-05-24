@@ -116,7 +116,10 @@ type NativeFn = dyn for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Se
 enum Ast {
     Empty,
     Fail(&'static str),
-    Str(Arc<str>),
+    Str {
+        lit: Arc<str>,
+        reason: String,
+    },
     AsciiChar {
         predicates: Vec<AsciiPredicate>,
         reason: String,
@@ -187,7 +190,7 @@ impl std::fmt::Debug for Ast {
         match self {
             Ast::Empty => write!(f, "Empty"),
             Ast::Fail(reason) => write!(f, "Fail({reason:?})"),
-            Ast::Str(lit) => write!(f, "Str({lit:?})"),
+            Ast::Str { lit, .. } => write!(f, "Str({lit:?})"),
             Ast::AsciiChar { predicates, .. } => write!(f, "AsciiChar({predicates:?})"),
             Ast::Utf8Char { predicates, .. } => write!(f, "Utf8Char({predicates:?})"),
             Ast::Utf8String {
@@ -521,7 +524,9 @@ pub fn ignore(parser: Parser) -> Parser {
 /// Matches the literal `lit`, emitting it as a [`Value::Str`]. Accepts any
 /// `Into<Arc<str>>`, so runtime-computed strings work, not just `&'static str`.
 pub fn string(lit: impl Into<Arc<str>>) -> Parser {
-    Parser::from_ast(Ast::Str(lit.into()))
+    let lit = lit.into();
+    let reason = format!("expected string \"{lit}\"");
+    Parser::from_ast(Ast::Str { lit, reason })
 }
 
 /// Matches one ASCII byte satisfying `predicates`, emitting its codepoint as a
@@ -803,7 +808,7 @@ fn run_ast<'a>(
             cursor,
         }),
 
-        Ast::Str(lit) => {
+        Ast::Str { lit, reason } => {
             if let Some(rest) = input.strip_prefix(lit.as_ref()) {
                 Ok(ParseSuccess {
                     tokens: vec![Value::Str(lit.to_string())],
@@ -813,7 +818,7 @@ fn run_ast<'a>(
                 })
             } else {
                 Err(ParseFailure {
-                    reason: format!("expected string \"{}\"", lit),
+                    reason: reason.clone(),
                     rest: input,
                     cursor,
                 })
@@ -1057,51 +1062,17 @@ fn run_ast<'a>(
             })
         }
 
-        Ast::Repeat { inner, min, max } => {
-            let mut rest = input;
-            let mut cur = cursor;
-            let mut ctx = context;
-            let mut tokens = Vec::new();
-            let mut count = 0usize;
-            loop {
-                if let Some(max) = max {
-                    if count >= *max {
-                        break;
-                    }
-                }
-                match run_ast(inner, rest, cur, ctx.clone()) {
-                    Ok(ok) => {
-                        if ok.rest.len() == rest.len() {
-                            break;
-                        }
-                        tokens.extend(ok.tokens);
-                        rest = ok.rest;
-                        cur = ok.cursor;
-                        ctx = ok.context;
-                        count += 1;
-                    }
-                    Err(err) => {
-                        if count < *min {
-                            return Err(err);
-                        }
-                        break;
-                    }
-                }
-            }
-            if count < *min {
-                return Err(ParseFailure {
-                    reason: "repeat did not reach minimum repetitions".to_string(),
-                    rest,
-                    cursor: cur,
-                });
-            }
-            Ok(ParseSuccess {
-                tokens,
-                rest,
-                cursor: cur,
-                context: ctx,
-            })
-        }
+        Ast::Repeat { inner, min, max } => run_repetition(
+            inner,
+            input,
+            cursor,
+            context,
+            *min,
+            *max,
+            "repeat did not reach minimum repetitions",
+            |_, _, _| true,
+            true,
+        ),
 
         Ast::Duplicate { inner, n } => {
             let mut rest = input;
@@ -1175,50 +1146,17 @@ fn run_ast<'a>(
             while_fn,
             min,
             max,
-        } => {
-            let mut rest = input;
-            let mut cur = cursor;
-            let mut ctx = context;
-            let mut tokens = Vec::new();
-            let mut count = 0usize;
-            loop {
-                if let Some(max) = max {
-                    if count >= *max {
-                        break;
-                    }
-                }
-                match while_fn(rest, cur, &ctx) {
-                    RepeatWhileControl::Halt => break,
-                    RepeatWhileControl::Cont => {}
-                }
-                match run_ast(inner, rest, cur, ctx.clone()) {
-                    Ok(ok) => {
-                        if ok.rest.len() == rest.len() {
-                            break;
-                        }
-                        tokens.extend(ok.tokens);
-                        rest = ok.rest;
-                        cur = ok.cursor;
-                        ctx = ok.context;
-                        count += 1;
-                    }
-                    Err(_) => break,
-                }
-            }
-            if count < *min {
-                return Err(ParseFailure {
-                    reason: "repeat_while did not reach minimum repetitions".to_string(),
-                    rest,
-                    cursor: cur,
-                });
-            }
-            Ok(ParseSuccess {
-                tokens,
-                rest,
-                cursor: cur,
-                context: ctx,
-            })
-        }
+        } => run_repetition(
+            inner,
+            input,
+            cursor,
+            context,
+            *min,
+            *max,
+            "repeat_while did not reach minimum repetitions",
+            |rest, cur, ctx| matches!(while_fn(rest, cur, ctx), RepeatWhileControl::Cont),
+            false,
+        ),
 
         Ast::Map(inner, f) => {
             let ok = run_ast(inner, input, cursor, context)?;
@@ -1382,11 +1320,80 @@ fn run_ast<'a>(
     }
 }
 
+/// Shared loop for [`Ast::Repeat`] and [`Ast::RepeatWhile`]. `should_continue`
+/// gates each iteration (always `true` for plain repeat; the `while` predicate
+/// otherwise). A successful iteration that consumes no input stops the loop.
+/// When the inner parser fails below `min`, `propagate_inner_error` decides
+/// whether to surface that error (repeat) or fall through to `too_few_reason`
+/// (repeat_while).
+#[allow(clippy::too_many_arguments)]
+fn run_repetition<'a>(
+    inner: &Arc<Ast>,
+    input: &'a str,
+    cursor: Cursor,
+    context: Context,
+    min: usize,
+    max: Option<usize>,
+    too_few_reason: &'static str,
+    mut should_continue: impl FnMut(&str, Cursor, &Context) -> bool,
+    propagate_inner_error: bool,
+) -> ParseResult<'a> {
+    let mut rest = input;
+    let mut cur = cursor;
+    let mut ctx = context;
+    let mut tokens = Vec::new();
+    let mut count = 0usize;
+
+    loop {
+        if let Some(max) = max {
+            if count >= max {
+                break;
+            }
+        }
+        if !should_continue(rest, cur, &ctx) {
+            break;
+        }
+        match run_ast(inner, rest, cur, ctx.clone()) {
+            Ok(ok) => {
+                if ok.rest.len() == rest.len() {
+                    break;
+                }
+                tokens.extend(ok.tokens);
+                rest = ok.rest;
+                cur = ok.cursor;
+                ctx = ok.context;
+                count += 1;
+            }
+            Err(err) => {
+                if propagate_inner_error && count < min {
+                    return Err(err);
+                }
+                break;
+            }
+        }
+    }
+
+    if count < min {
+        return Err(ParseFailure {
+            reason: too_few_reason.to_string(),
+            rest,
+            cursor: cur,
+        });
+    }
+
+    Ok(ParseSuccess {
+        tokens,
+        rest,
+        cursor: cur,
+        context: ctx,
+    })
+}
+
 fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize, config: &GenerateConfig) -> String {
     match ast.as_ref() {
         Ast::Empty | Ast::Fail(_) | Ast::Eos | Ast::Native(_) => String::new(),
 
-        Ast::Str(lit) => (*lit).to_string(),
+        Ast::Str { lit, .. } => lit.to_string(),
 
         Ast::AsciiChar { predicates, .. } => gen_ascii_byte(predicates, rng)
             .map(|b| (b as char).to_string())
