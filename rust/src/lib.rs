@@ -63,6 +63,18 @@ pub struct ParseFailure<'a> {
     pub cursor: Cursor,
 }
 
+impl std::fmt::Display for ParseFailure<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (line {}, byte offset {})",
+            self.reason, self.cursor.line, self.cursor.byte_offset
+        )
+    }
+}
+
+impl std::error::Error for ParseFailure<'_> {}
+
 pub type ParseResult<'a> = Result<ParseSuccess<'a>, ParseFailure<'a>>;
 
 type MapFn = dyn Fn(Value) -> Value + Send + Sync;

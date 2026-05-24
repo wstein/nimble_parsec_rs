@@ -53,6 +53,18 @@ fn ascii_char_reports_negated_constraints() {
 }
 
 #[test]
+fn parse_failure_displays_and_is_a_std_error() {
+    let err = string("foo").parse("bar").expect_err("should fail");
+    let text = err.to_string();
+    assert!(text.contains("expected string"));
+    assert!(text.contains("byte offset 0"));
+
+    // Usable through the std error trait object.
+    let boxed: Box<dyn std::error::Error> = Box::new(err);
+    assert!(boxed.to_string().contains("expected string"));
+}
+
+#[test]
 fn utf8_char_reports_allowed_range() {
     let parser = utf8_char(vec![Utf8Predicate::Range('a'..='z')]);
     let err = parser.parse("0").expect_err("non-letter should fail");
