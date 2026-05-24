@@ -1,3 +1,24 @@
+//! A Rust port of [NimbleParsec](https://github.com/dashbitco/nimble_parsec),
+//! a parser-combinator library.
+//!
+//! Build a parser by composing combinators — either as free functions
+//! ([`concat`], [`choice`], …) for NimbleParsec naming parity, or via the
+//! equivalent fluent methods on [`Parser`] ([`Parser::then`], [`Parser::or`],
+//! …). Run it with [`Parser::parse`], which yields a [`ParseSuccess`] (tokens,
+//! remaining input, [`Cursor`], and threaded [`Context`]) or a [`ParseFailure`].
+//!
+//! ```
+//! use nimble_parsec_rs::{ascii_char, integer_min, AsciiPredicate, BigInt, Value};
+//!
+//! // A lowercase letter followed by an integer.
+//! let parser = ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]).then(integer_min(1));
+//! let ok = parser.parse("a42").expect("parses");
+//!
+//! // `ascii_char` emits the matched byte as a codepoint; `integer` emits a bigint.
+//! assert_eq!(ok.tokens, vec![Value::Int(BigInt::from(b'a')), Value::Int(BigInt::from(42))]);
+//! assert_eq!(ok.rest, "");
+//! ```
+
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
@@ -28,11 +49,14 @@ impl Default for Cursor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     /// An arbitrary-precision integer, mirroring NimbleParsec's BEAM integers,
     /// which are unbounded. Produced by the `integer` and `ascii_char`
     /// combinators (the latter emits the matched byte as its codepoint).
     Int(BigInt),
+    /// A UTF-8 string, produced by `string`, `utf8_string`, `ascii_string`,
+    /// and `bytes`.
     Str(String),
     /// A list of values wrapping a combinator's results, produced by `wrap`.
     List(Vec<Value>),
@@ -210,6 +234,7 @@ impl std::fmt::Debug for Ast {
 }
 
 #[derive(Clone, Debug)]
+#[must_use = "a Parser does nothing unless run with `parse`/`run` or composed into another parser"]
 pub struct Parser {
     ast: Arc<Ast>,
 }
@@ -219,10 +244,13 @@ impl Parser {
         Self { ast: Arc::new(ast) }
     }
 
+    /// Runs the parser from an explicit `cursor` and `context`, threading both
+    /// through the parse. Most callers want [`Parser::parse`].
     pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
         run_ast(&self.ast, input, cursor, context)
     }
 
+    /// Parses `input` from the start (default cursor, empty context).
     pub fn parse<'a>(&self, input: &'a str) -> ParseResult<'a> {
         self.run(input, Cursor::default(), Context::new())
     }
@@ -233,49 +261,41 @@ impl Parser {
 /// so behavior is identical; pick whichever reads better at the call site.
 impl Parser {
     /// Sequences `self` followed by `next`. See [`concat`].
-    #[must_use]
     pub fn then(self, next: Parser) -> Parser {
         concat(self, next)
     }
 
     /// Succeeds with `self`, or `alt` if `self` fails. See [`choice`].
-    #[must_use]
     pub fn or(self, alt: Parser) -> Parser {
         choice(vec![self, alt])
     }
 
     /// Discards `self`'s result tokens. See [`ignore`].
-    #[must_use]
     pub fn ignored(self) -> Parser {
         ignore(self)
     }
 
     /// Makes `self` optional. See [`optional`].
-    #[must_use]
     pub fn optional(self) -> Parser {
         optional(self)
     }
 
     /// Repeats `self` between `min` and `max` times. See [`repeat`].
-    #[must_use]
     pub fn repeated(self, min: usize, max: Option<usize>) -> Parser {
         repeat(self, min, max)
     }
 
     /// Repeats `self` per [`TimesOptions`]. See [`times`].
-    #[must_use]
     pub fn times(self, options: TimesOptions) -> Parser {
         times(self, options)
     }
 
     /// Parses `self` exactly `n` times in sequence. See [`duplicate`].
-    #[must_use]
     pub fn duplicated(self, n: usize) -> Parser {
         duplicate(self, n)
     }
 
     /// Maps each result token individually. See [`map`].
-    #[must_use]
     pub fn map<F>(self, f: F) -> Parser
     where
         F: Fn(Value) -> Value + Send + Sync + 'static,
@@ -284,7 +304,6 @@ impl Parser {
     }
 
     /// Reduces all result tokens into one. See [`reduce`].
-    #[must_use]
     pub fn reduce<F>(self, f: F) -> Parser
     where
         F: Fn(Vec<Value>) -> Value + Send + Sync + 'static,
@@ -293,31 +312,26 @@ impl Parser {
     }
 
     /// Tags the result tokens. See [`tag`].
-    #[must_use]
     pub fn tagged(self, name: &'static str) -> Parser {
         tag(name, self)
     }
 
     /// Tags a single result token. See [`unwrap_and_tag`].
-    #[must_use]
     pub fn unwrap_and_tagged(self, name: &'static str) -> Parser {
         unwrap_and_tag(name, self)
     }
 
     /// Wraps the result tokens in a single list value. See [`wrap`].
-    #[must_use]
     pub fn wrapped(self) -> Parser {
         wrap(self)
     }
 
     /// Replaces the result tokens with a constant. See [`replace`].
-    #[must_use]
     pub fn replaced_with(self, value: Value) -> Parser {
         replace(self, value)
     }
 
     /// Overrides the failure message. See [`label`].
-    #[must_use]
     pub fn labelled(self, label_text: &'static str) -> Parser {
         label(self, label_text)
     }
@@ -369,8 +383,11 @@ where
     reference.parser()
 }
 
-/// Tunes [`generate_with`].
+/// Tunes [`generate_with`]. Construct via [`GenerateConfig::default`] and the
+/// `with_*` builders; it is `#[non_exhaustive]` so fields may be added without a
+/// breaking change.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct GenerateConfig {
     /// Maximum reference-expansion depth before recursion stops, keeping
     /// generation terminating on recursive grammars. Default 16.
@@ -386,6 +403,20 @@ impl Default for GenerateConfig {
             max_recursion_depth: 16,
             repeat_window: 3,
         }
+    }
+}
+
+impl GenerateConfig {
+    /// Sets [`GenerateConfig::max_recursion_depth`].
+    pub fn with_max_recursion_depth(mut self, depth: usize) -> Self {
+        self.max_recursion_depth = depth;
+        self
+    }
+
+    /// Sets [`GenerateConfig::repeat_window`].
+    pub fn with_repeat_window(mut self, window: usize) -> Self {
+        self.repeat_window = window;
+        self
     }
 }
 
@@ -405,12 +436,20 @@ pub fn generate_with(parser: &Parser, seed: u64, config: GenerateConfig) -> Stri
     generate_ast(&parser.ast, &mut rng, 0, &config)
 }
 
+/// Byte membership constraints for `ascii_char` and `ascii_string`, mirroring
+/// NimbleParsec's range list. An empty set accepts any ASCII byte.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AsciiPredicate {
+    /// Matches any ASCII byte.
     Any,
+    /// Matches a byte within the inclusive range.
     Range(RangeInclusive<u8>),
+    /// Matches exactly this byte.
     Char(u8),
+    /// Excludes a byte within the inclusive range.
     NotRange(RangeInclusive<u8>),
+    /// Excludes exactly this byte.
     NotChar(u8),
 }
 
@@ -418,11 +457,17 @@ pub enum AsciiPredicate {
 /// mirroring NimbleParsec's range list (`min..max`, a codepoint, or their
 /// `{:not, ...}` negations). An empty set accepts any codepoint.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Utf8Predicate {
+    /// Matches any codepoint.
     Any,
+    /// Matches a codepoint within the inclusive range.
     Range(RangeInclusive<char>),
+    /// Matches exactly this codepoint.
     Char(char),
+    /// Excludes a codepoint within the inclusive range.
     NotRange(RangeInclusive<char>),
+    /// Excludes exactly this codepoint.
     NotChar(char),
 }
 
@@ -458,32 +503,42 @@ pub enum RepeatWhileControl {
     Halt,
 }
 
+/// Matches nothing and emits no tokens; the identity for [`concat`].
 pub fn empty() -> Parser {
     Parser::from_ast(Ast::Empty)
 }
 
+/// Sequences `left` then `right`, concatenating their tokens.
 pub fn concat(left: Parser, right: Parser) -> Parser {
     Parser::from_ast(Ast::Concat(left.ast, right.ast))
 }
 
+/// Runs `parser` but discards its result tokens (the input is still consumed).
 pub fn ignore(parser: Parser) -> Parser {
     Parser::from_ast(Ast::Ignore(parser.ast))
 }
 
+/// Matches the literal `lit`, emitting it as a [`Value::Str`].
 pub fn string(lit: &'static str) -> Parser {
     Parser::from_ast(Ast::Str(lit))
 }
 
+/// Matches one ASCII byte satisfying `predicates`, emitting its codepoint as a
+/// [`Value::Int`]. An empty predicate set matches any ASCII byte.
 pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
     let reason = format!("expected {}", describe_ascii(&predicates));
     Parser::from_ast(Ast::AsciiChar { predicates, reason })
 }
 
+/// Matches one UTF-8 codepoint satisfying `predicates`, emitting it as a
+/// [`Value::Int`]. An empty predicate set matches any codepoint.
 pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
     let reason = format!("expected {}", describe_utf8(&predicates));
     Parser::from_ast(Ast::Utf8Char { predicates, reason })
 }
 
+/// Matches between `min` and `max` codepoints satisfying `predicates`, emitting
+/// the run as a single [`Value::Str`].
 pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize>) -> Parser {
     Parser::from_ast(Ast::Utf8String {
         predicates,
@@ -492,6 +547,8 @@ pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize
     })
 }
 
+/// Matches between `min` and `max` ASCII bytes satisfying `predicates`,
+/// emitting the run as a single [`Value::Str`].
 pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usize>) -> Parser {
     Parser::from_ast(Ast::AsciiString {
         predicates,
@@ -513,18 +570,24 @@ pub fn eos() -> Parser {
     Parser::from_ast(Ast::Eos)
 }
 
+/// Matches exactly `n` digits, emitting the value as a [`Value::Int`].
 pub fn integer_exact(n: usize) -> Parser {
     integer_range(n, Some(n))
 }
 
+/// Matches at least `min` digits (greedy, unbounded), emitting a [`Value::Int`].
 pub fn integer_min(min: usize) -> Parser {
     integer_range(min, None)
 }
 
+/// Matches between `min` and `max` digits, emitting the value as a
+/// [`Value::Int`] (arbitrary precision).
 pub fn integer_range(min: usize, max: Option<usize>) -> Parser {
     Parser::from_ast(Ast::Integer { min, max })
 }
 
+/// Makes `parser` optional: on failure it succeeds with no tokens, consuming
+/// nothing.
 pub fn optional(parser: Parser) -> Parser {
     Parser::from_ast(Ast::Optional(parser.ast))
 }
@@ -576,10 +639,14 @@ pub fn eventually(parser: Parser) -> Parser {
     Parser::from_ast(Ast::Eventually(parser.ast))
 }
 
+/// Zero-width assertion: succeeds (consuming nothing, emitting nothing) when
+/// `parser` would match here.
 pub fn lookahead(parser: Parser) -> Parser {
     Parser::from_ast(Ast::Lookahead(parser.ast))
 }
 
+/// Zero-width negative assertion: succeeds (consuming nothing, emitting nothing)
+/// when `parser` would *not* match here.
 pub fn lookahead_not(parser: Parser) -> Parser {
     Parser::from_ast(Ast::LookaheadNot(parser.ast))
 }
@@ -646,6 +713,7 @@ where
     Parser::from_ast(Ast::PreTraverse(parser.ast, Arc::new(f)))
 }
 
+/// Wraps `parser`'s result tokens in a single [`Value::Tagged`] under `name`.
 pub fn tag(name: &'static str, parser: Parser) -> Parser {
     Parser::from_ast(Ast::Tag(name, parser.ast))
 }

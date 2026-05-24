@@ -210,6 +210,9 @@ fn format_token(value: &Value) -> String {
         Value::List(inner) => format!("l:({})", format_tokens(inner)),
         Value::Tagged(name, inner) => format!("t:{name}:({})", format_tokens(inner)),
         Value::KeyValue(name, inner) => format!("kv:{name}:{}", format_token(inner)),
+        // `Value` is #[non_exhaustive]; the differential fixtures only emit the
+        // variants above.
+        other => unreachable!("unexpected Value variant in differential serializer: {other:?}"),
     }
 }
 

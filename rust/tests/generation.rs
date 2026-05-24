@@ -68,10 +68,7 @@ fn generate_with_repeat_window_zero_emits_exactly_min() {
         2,
         None,
     );
-    let config = GenerateConfig {
-        repeat_window: 0,
-        ..Default::default()
-    };
+    let config = GenerateConfig::default().with_repeat_window(0);
     let input = generate_with(&parser, 1, config);
     assert_eq!(input.chars().count(), 2);
     assert!(parser.parse(&input).is_ok());
@@ -85,10 +82,7 @@ fn generate_with_shallow_depth_still_terminates() {
             string("x"),
         ])
     });
-    let config = GenerateConfig {
-        max_recursion_depth: 2,
-        ..Default::default()
-    };
+    let config = GenerateConfig::default().with_max_recursion_depth(2);
     for seed in 0..10u64 {
         let input = generate_with(&parens, seed, config);
         assert!(parens.parse(&input).is_ok(), "did not parse: {input:?}");
