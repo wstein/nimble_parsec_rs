@@ -70,23 +70,20 @@ Status legend:
 | `quoted_post_traverse` / `quoted_pre_traverse` | — | ❌ | Compile-time traversal variants. |
 | `quoted_repeat_while` | — | ❌ | Compile-time `repeat_while` variant. |
 | `parsec` | `ParserRef` / `recursive` | ✅ | Forward-declarable references for recursive grammars (runtime, not module-level names). |
-| `generate` | — | ❌ | Random input generation from a parser. |
+| `generate` | `generate` | ✅ | Seeded random input synthesis by walking the AST; round-trips for non-recursive grammars. |
 | `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `compile_parser!` | ⚠️ | Codegen entry points; the Rust proc-macro is a passthrough scaffold with no specialization yet. |
 
 ## Summary
 
 The full runtime combinator surface is ported: primitives, control flow,
-transforms/tagging, error labeling, and position metadata. The remaining ❌
-rows are not drop-in combinators but four larger design efforts:
+transforms/tagging, error labeling, position metadata, recursion, and random
+generation. `Parser` is now a reified `Ast` walked by an interpreter, so the
+grammar is introspectable — which is what unblocked `generate`.
 
-1. **Generators** (`generate`) — random input synthesis from a parser. Blocked
-   by the closure-based design: a `Parser` is an opaque function with no
-   introspectable structure to generate from.
-2. **Compile-time code generation** (`defparsec` family) — the proc-macro
-   specialization that gives NimbleParsec its performance.
-
-Both require reifying parsers as an inspectable data structure (an AST) rather
-than opaque closures — a separate architectural initiative.
+The one remaining ❌ of substance is **compile-time code generation** (the
+`defparsec` family / specializing `compile_parser!`): emitting specialized Rust
+for a grammar at compile time, which is what gives NimbleParsec its performance.
+The AST makes this tractable, but it remains a proc-macro effort.
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a

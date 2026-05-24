@@ -30,6 +30,7 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
   - `line`, `byte_offset` (position metadata)
   - `debug` (prints parser state to stderr)
   - `ParserRef` / `recursive` (forward references for recursive grammars)
+- `generate(&parser, seed)` produces a random accepted input (seeded; round-trips for non-recursive grammars)
 
   ## Benchmark scaffold
 
@@ -47,7 +48,6 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
 ## Not Yet Ported
 
 - Compile-time parser generation equivalent to `defparsec/defcombinator`
-- Generator support (`generate/1`) and metadata export
 
 Error messages follow NimbleParsec's phrasing (e.g. `expected ASCII character in
 the range "0" to "9"`), but exact `inspect` escaping of non-printable codepoints

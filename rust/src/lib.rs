@@ -3,6 +3,8 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
 
 use num_bigint::BigInt;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 pub use nimble_parsec_rs_macro::compile_parser;
 
@@ -201,6 +203,16 @@ where
     let definition = build(reference.parser());
     reference.define(definition);
     reference.parser()
+}
+
+/// Generates a random input string accepted by `parser`, seeded by `seed` for
+/// reproducibility, mirroring NimbleParsec's `generate`. For non-recursive
+/// grammars the result round-trips (it parses successfully). Recursion is
+/// depth-bounded so generation always terminates; zero-width assertions
+/// (`lookahead`/`lookahead_not`) and `repeat_while` predicates are best-effort.
+pub fn generate(parser: &Parser, seed: u64) -> String {
+    let mut rng = StdRng::seed_from_u64(seed);
+    generate_ast(&parser.ast, &mut rng, 0)
 }
 
 #[derive(Clone, Debug)]
@@ -1087,6 +1099,225 @@ fn run_ast<'a>(
                 .expect("parsec reference used before it was defined");
             run_ast(inner, input, cursor, context)
         }
+    }
+}
+
+/// Recursion budget for `generate`: beyond this depth, recursive references
+/// stop expanding so generation always terminates.
+const GENERATE_DEPTH_LIMIT: usize = 16;
+
+fn generate_ast(ast: &Arc<Ast>, rng: &mut StdRng, depth: usize) -> String {
+    match ast.as_ref() {
+        Ast::Empty | Ast::Fail(_) | Ast::Eos => String::new(),
+
+        Ast::Str(lit) => (*lit).to_string(),
+
+        Ast::AsciiChar { predicates, .. } => gen_ascii_byte(predicates, rng)
+            .map(|b| (b as char).to_string())
+            .unwrap_or_default(),
+
+        Ast::Utf8Char { predicates, .. } => gen_utf8_char(predicates, rng)
+            .map(String::from)
+            .unwrap_or_default(),
+
+        Ast::AsciiString {
+            predicates,
+            min,
+            max,
+        } => {
+            let mut out = String::new();
+            for _ in 0..gen_count(*min, *max, rng) {
+                match gen_ascii_byte(predicates, rng) {
+                    Some(b) => out.push(b as char),
+                    None => break,
+                }
+            }
+            out
+        }
+
+        Ast::Utf8String {
+            predicates,
+            min,
+            max,
+        } => {
+            let mut out = String::new();
+            for _ in 0..gen_count(*min, *max, rng) {
+                match gen_utf8_char(predicates, rng) {
+                    Some(c) => out.push(c),
+                    None => break,
+                }
+            }
+            out
+        }
+
+        Ast::Bytes(n) => (0..*n)
+            .map(|_| (b'a' + rng.gen_range(0..26)) as char)
+            .collect(),
+
+        Ast::Integer { min, max } => {
+            let lo = (*min).max(1);
+            let count = gen_count(lo, max.map(|m| m.max(lo)), rng).max(1);
+            (0..count)
+                .map(|_| (b'0' + rng.gen_range(0..10)) as char)
+                .collect()
+        }
+
+        Ast::Concat(left, right) => {
+            generate_ast(left, rng, depth) + &generate_ast(right, rng, depth)
+        }
+
+        Ast::Ignore(inner)
+        | Ast::Eventually(inner)
+        | Ast::Map(inner, _)
+        | Ast::Reduce(inner, _)
+        | Ast::Tag(_, inner)
+        | Ast::UnwrapAndTag(_, inner)
+        | Ast::Wrap(inner)
+        | Ast::Replace(inner, _)
+        | Ast::Label(inner, _)
+        | Ast::ByteOffset(inner)
+        | Ast::Line(inner)
+        | Ast::Debug(inner)
+        | Ast::PostTraverse(inner, _)
+        | Ast::PreTraverse(inner, _) => generate_ast(inner, rng, depth),
+
+        Ast::Lookahead(_) | Ast::LookaheadNot(_) => String::new(),
+
+        Ast::Optional(inner) => {
+            if depth < GENERATE_DEPTH_LIMIT && rng.gen_bool(0.5) {
+                generate_ast(inner, rng, depth)
+            } else {
+                String::new()
+            }
+        }
+
+        Ast::Choice(choices) => {
+            if choices.is_empty() {
+                return String::new();
+            }
+            let idx = if depth >= GENERATE_DEPTH_LIMIT {
+                // Prefer a branch that cannot recurse, so generation terminates.
+                choices
+                    .iter()
+                    .position(|c| !contains_reference(c))
+                    .unwrap_or(0)
+            } else {
+                rng.gen_range(0..choices.len())
+            };
+            generate_ast(&choices[idx], rng, depth)
+        }
+
+        Ast::Repeat { inner, min, max } => {
+            let mut out = String::new();
+            for _ in 0..gen_count(*min, *max, rng) {
+                out.push_str(&generate_ast(inner, rng, depth));
+            }
+            out
+        }
+
+        Ast::Duplicate { inner, n } => {
+            let mut out = String::new();
+            for _ in 0..*n {
+                out.push_str(&generate_ast(inner, rng, depth));
+            }
+            out
+        }
+
+        // The while predicate is opaque, so emit the minimum required count.
+        Ast::RepeatWhile { inner, min, .. } => {
+            let mut out = String::new();
+            for _ in 0..*min {
+                out.push_str(&generate_ast(inner, rng, depth));
+            }
+            out
+        }
+
+        Ast::Reference(cell) => {
+            if depth >= GENERATE_DEPTH_LIMIT {
+                String::new()
+            } else {
+                match cell.get() {
+                    Some(inner) => generate_ast(inner, rng, depth + 1),
+                    None => String::new(),
+                }
+            }
+        }
+    }
+}
+
+/// Chooses a repetition count within `[min, max]`, defaulting an unbounded
+/// `max` to a small window above `min`.
+fn gen_count(min: usize, max: Option<usize>, rng: &mut StdRng) -> usize {
+    let upper = max.unwrap_or(min + 3).max(min);
+    if upper == min {
+        min
+    } else {
+        rng.gen_range(min..=upper)
+    }
+}
+
+fn gen_ascii_byte(predicates: &[AsciiPredicate], rng: &mut StdRng) -> Option<u8> {
+    let candidates: Vec<u8> = (0u8..=0x7f)
+        .filter(|b| matches_ascii(*b, predicates))
+        .collect();
+    if candidates.is_empty() {
+        None
+    } else {
+        Some(candidates[rng.gen_range(0..candidates.len())])
+    }
+}
+
+fn gen_utf8_char(predicates: &[Utf8Predicate], rng: &mut StdRng) -> Option<char> {
+    let mut candidates: Vec<char> = Vec::new();
+    for p in predicates {
+        match p {
+            Utf8Predicate::Range(r) => {
+                candidates.push(*r.start());
+                candidates.push(*r.end());
+            }
+            Utf8Predicate::Char(c) => candidates.push(*c),
+            _ => {}
+        }
+    }
+    if candidates.is_empty() {
+        candidates.extend(['a', 'b', 'c', '0', '9', ' ']);
+    }
+    candidates.retain(|c| matches_utf8(*c, predicates));
+    if candidates.is_empty() {
+        None
+    } else {
+        Some(candidates[rng.gen_range(0..candidates.len())])
+    }
+}
+
+/// Detects whether `ast` directly contains a reference node, without following
+/// references (so the walk stays finite even for recursive grammars).
+fn contains_reference(ast: &Arc<Ast>) -> bool {
+    match ast.as_ref() {
+        Ast::Reference(_) => true,
+        Ast::Concat(a, b) => contains_reference(a) || contains_reference(b),
+        Ast::Choice(choices) => choices.iter().any(contains_reference),
+        Ast::Ignore(i)
+        | Ast::Optional(i)
+        | Ast::Eventually(i)
+        | Ast::Lookahead(i)
+        | Ast::LookaheadNot(i)
+        | Ast::Wrap(i)
+        | Ast::ByteOffset(i)
+        | Ast::Line(i)
+        | Ast::Debug(i)
+        | Ast::Map(i, _)
+        | Ast::Reduce(i, _)
+        | Ast::Replace(i, _)
+        | Ast::Label(i, _)
+        | Ast::Tag(_, i)
+        | Ast::UnwrapAndTag(_, i)
+        | Ast::PostTraverse(i, _)
+        | Ast::PreTraverse(i, _)
+        | Ast::Repeat { inner: i, .. }
+        | Ast::Duplicate { inner: i, .. }
+        | Ast::RepeatWhile { inner: i, .. } => contains_reference(i),
+        _ => false,
     }
 }
 
