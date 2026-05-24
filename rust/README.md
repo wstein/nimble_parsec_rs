@@ -56,7 +56,7 @@ and `integer`'s composite "followed by" message are not byte-identical.
 ## Why this split
 
 NimbleParsec's main advantage is compile-time generation into highly optimized BEAM clauses.
-A faithful Rust port likely needs procedural macros and specialized codegen. This phase gives a validated runtime substrate first, which de-risks API and semantics before code generation work.
+A faithful Rust port likely needs procedural macros and specialized codegen. The runtime substrate here is now a reified `Ast` walked by an interpreter, which both de-risks API/semantics and is the structure codegen would lower. `compile_parser!` is still a validated passthrough; true specialization (emitting generated parsing code that produces identical tokens) remains future work.
 
 ## Run tests
 
