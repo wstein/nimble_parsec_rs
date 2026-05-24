@@ -298,6 +298,72 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             Some(quote! { #left #right })
         }
 
+        // -- ascii_char ---------------------------------------------------
+        "ascii_char" if args.len() == 1 => {
+            let preds = vec_elements(&args[0])?;
+            let cond = char_class_condition(&preds, &quote!(__b))?;
+            let reason_preds = quote!(&[#(#preds),*]);
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Int(
+                        ::nimble_parsec_rs::Integer::from(__b),
+                    ));
+                }
+            };
+            Some(quote! {{
+                match __input.as_bytes().first() {
+                    ::std::option::Option::Some(&__b) if __b <= 0x7f && (#cond) => {
+                        #push
+                        let __consumed = &__input[..1];
+                        __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                        __input = &__input[1..];
+                    }
+                    _ => {
+                        return Err(::nimble_parsec_rs::ParseFailure {
+                            reason: ::nimble_parsec_rs::__private::ascii_char_reason(#reason_preds),
+                            rest: __input,
+                            cursor: __cursor,
+                        });
+                    }
+                }
+            }})
+        }
+
+        // -- utf8_char ----------------------------------------------------
+        "utf8_char" if args.len() == 1 => {
+            let preds = vec_elements(&args[0])?;
+            let cond = char_class_condition(&preds, &quote!(__c))?;
+            let reason_preds = quote!(&[#(#preds),*]);
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Int(
+                        ::nimble_parsec_rs::Integer::from(__c as u32),
+                    ));
+                }
+            };
+            Some(quote! {{
+                match __input.chars().next() {
+                    ::std::option::Option::Some(__c) if (#cond) => {
+                        #push
+                        let __consumed = &__input[..__c.len_utf8()];
+                        __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                        __input = &__input[__c.len_utf8()..];
+                    }
+                    _ => {
+                        return Err(::nimble_parsec_rs::ParseFailure {
+                            reason: ::nimble_parsec_rs::__private::utf8_char_reason(#reason_preds),
+                            rest: __input,
+                            cursor: __cursor,
+                        });
+                    }
+                }
+            }})
+        }
+
         // -- choice -------------------------------------------------------
         // Only when the argument is a `vec![..]` literal and every branch is
         // itself codegen-able; otherwise fall back to runtime. Each branch runs
@@ -378,6 +444,72 @@ fn vec_elements(expr: &Expr) -> Option<Vec<Expr>> {
         .parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
         .ok()?;
     Some(parsed.into_iter().collect())
+}
+
+/// Splits a predicate expression like `AsciiPredicate::Range(b'0'..=b'9')` into
+/// its variant name (last path segment) and single argument (if any).
+fn predicate_parts(expr: &Expr) -> Option<(String, Option<Expr>)> {
+    match expr {
+        Expr::Path(p) => Some((p.path.segments.last()?.ident.to_string(), None)),
+        Expr::Call(call) => {
+            let Expr::Path(p) = call.func.as_ref() else {
+                return None;
+            };
+            if call.args.len() != 1 {
+                return None;
+            }
+            Some((
+                p.path.segments.last()?.ident.to_string(),
+                Some(call.args[0].clone()),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Lowers a predicate list to a boolean membership test on `var`, mirroring the
+/// runtime rule: hit at least one positive (or there are none) and no negative.
+/// Returns `None` if any predicate is not a recognizable `*Predicate` variant.
+fn char_class_condition(exprs: &[Expr], var: &TokenStream2) -> Option<TokenStream2> {
+    let mut positives: Vec<TokenStream2> = Vec::new();
+    let mut negatives: Vec<TokenStream2> = Vec::new();
+    for e in exprs {
+        let (name, inner) = predicate_parts(e)?;
+        match (name.as_str(), inner) {
+            ("Any", None) => positives.push(quote!(true)),
+            ("Char", Some(c)) => positives.push(quote!(#var == #c)),
+            ("NotChar", Some(c)) => negatives.push(quote!(#var == #c)),
+            ("Range" | "NotRange", Some(r)) => {
+                // Only literal closed ranges (`a..=b`) are recognized; lower them
+                // to an opaque helper so the comparison dodges range/ascii lints.
+                let Expr::Range(range) = &r else {
+                    return None;
+                };
+                if !matches!(range.limits, syn::RangeLimits::Closed(_)) {
+                    return None;
+                }
+                let (Some(lo), Some(hi)) = (&range.start, &range.end) else {
+                    return None;
+                };
+                let cond = quote!(::nimble_parsec_rs::__private::in_range(#var, #lo, #hi));
+                if name == "Range" {
+                    positives.push(cond);
+                } else {
+                    negatives.push(cond);
+                }
+            }
+            _ => return None,
+        }
+    }
+    let pos = positives
+        .into_iter()
+        .reduce(|a, b| quote!(#a || #b))
+        .unwrap_or(quote!(true));
+    let neg = negatives
+        .into_iter()
+        .reduce(|a, b| quote!(#a || #b))
+        .unwrap_or(quote!(false));
+    Some(quote!((#pos) && !(#neg)))
 }
 
 /// Extracts `(last_path_segment_name, args)` from a function-call expression.

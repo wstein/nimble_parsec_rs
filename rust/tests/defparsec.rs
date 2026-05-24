@@ -142,6 +142,56 @@ fn defparsec_choice_codegen() {
 }
 
 #[test]
+fn compile_parser_ascii_char_matches_runtime() {
+    use nimble_parsec_rs::{ascii_char, compile_parser, AsciiPredicate};
+
+    let compiled = compile_parser!(concat(
+        ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]),
+        ascii_char(vec![
+            AsciiPredicate::Range(b'0'..=b'9'),
+            AsciiPredicate::NotChar(b'3')
+        ])
+    ));
+    let runtime = concat(
+        ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]),
+        ascii_char(vec![
+            AsciiPredicate::Range(b'0'..=b'9'),
+            AsciiPredicate::NotChar(b'3'),
+        ]),
+    );
+
+    for input in ["a5", "a3", "x", "z9!", ""] {
+        match (compiled.parse(input), runtime.parse(input)) {
+            (Ok(c), Ok(r)) => {
+                assert_eq!(c.tokens, r.tokens, "tokens differ for {input:?}");
+                assert_eq!(c.rest, r.rest, "rest differs for {input:?}");
+            }
+            (Err(c), Err(r)) => assert_eq!(c.reason, r.reason, "reason differs for {input:?}"),
+            _ => panic!("codegen and runtime disagree for {input:?}"),
+        }
+    }
+}
+
+#[test]
+fn compile_parser_utf8_char_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, utf8_char, Utf8Predicate};
+
+    let compiled = compile_parser!(utf8_char(vec![Utf8Predicate::Range('a'..='z')]));
+    let runtime = utf8_char(vec![Utf8Predicate::Range('a'..='z')]);
+
+    for input in ["a", "é", "0", "z!", ""] {
+        match (compiled.parse(input), runtime.parse(input)) {
+            (Ok(c), Ok(r)) => {
+                assert_eq!(c.tokens, r.tokens, "tokens differ for {input:?}");
+                assert_eq!(c.rest, r.rest, "rest differs for {input:?}");
+            }
+            (Err(c), Err(r)) => assert_eq!(c.reason, r.reason, "reason differs for {input:?}"),
+            _ => panic!("codegen and runtime disagree for {input:?}"),
+        }
+    }
+}
+
+#[test]
 fn compile_parser_choice_matches_runtime() {
     use nimble_parsec_rs::compile_parser;
 

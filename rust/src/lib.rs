@@ -946,13 +946,35 @@ pub fn debug(parser: Parser) -> Parser {
 /// not call these directly.
 #[doc(hidden)]
 pub mod __private {
-    use super::{advance, Ast, Context, Cursor, Integer, ParseResult, Parser};
+    use super::{
+        advance, describe, AsciiPredicate, Ast, Context, Cursor, Integer, ParseResult, Parser,
+        Utf8Predicate,
+    };
     use std::sync::Arc;
 
     /// Parses a non-empty run of ASCII digits into an [`Integer`] (small-value
     /// fast path), for generated `integer_*` code.
     pub fn parse_integer(digits: &str) -> Integer {
         Integer::from_digits(digits)
+    }
+
+    /// Inclusive-range membership for generated `ascii_char`/`utf8_char` code.
+    /// Kept as a function so the generated range check is opaque to lints like
+    /// `clippy::manual_is_ascii_check`.
+    pub fn in_range<T: PartialOrd>(value: T, lo: T, hi: T) -> bool {
+        value >= lo && value <= hi
+    }
+
+    /// Builds the `ascii_char` failure message on the cold error path of
+    /// generated code, identical to the interpreter's.
+    pub fn ascii_char_reason(predicates: &[AsciiPredicate]) -> String {
+        format!("expected {}", describe(predicates))
+    }
+
+    /// Builds the `utf8_char` failure message on the cold error path of
+    /// generated code, identical to the interpreter's.
+    pub fn utf8_char_reason(predicates: &[Utf8Predicate]) -> String {
+        format!("expected {}", describe(predicates))
     }
 
     /// Wraps a raw function as a `Parser` so generated specialized parsers fit
