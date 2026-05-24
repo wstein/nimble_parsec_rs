@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use nimble_parsec_rs::{
-    ascii_char, ascii_string, concat, duplicate, ignore, integer_exact, integer_min, lookahead,
-    repeat_while, string, tag, wrap, AsciiPredicate, RepeatWhileControl, Value,
+    ascii_char, ascii_string, concat, duplicate, generate, ignore, integer_exact, integer_min,
+    lookahead, repeat_while, string, tag, wrap, AsciiPredicate, RepeatWhileControl, Value,
 };
 
 /// True when an Elixir `mix` is runnable, so the differential test can be
@@ -108,6 +109,74 @@ fn differential_runner_matches_shared_elixir_scenarios() {
         elixir.get("dup_ab").expect("missing dup_ab case"),
         &rust_dup,
     );
+}
+
+#[test]
+fn differential_generate_fuzzing_datetime() {
+    if !mix_available() {
+        eprintln!("skipping fuzz test: `mix` is not available on PATH");
+        return;
+    }
+
+    let parser = datetime_parser();
+    let inputs: Vec<String> = (0..30u64).map(|seed| generate(&parser, seed)).collect();
+    let stdin_data = format!("{}\n", inputs.join("\n"));
+
+    let mut child = Command::new("mix")
+        .arg("run")
+        .arg("rust/tests/fixtures/fuzz_cases.exs")
+        .current_dir("..")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mix for fuzz fixtures");
+
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_data.as_bytes())
+        .expect("failed to write generated inputs to mix");
+
+    let output = child.wait_with_output().expect("failed to wait for mix");
+    assert!(
+        output.status.success(),
+        "elixir fuzz fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let elixir_lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        elixir_lines.len(),
+        inputs.len(),
+        "expected one Elixir result per generated input"
+    );
+
+    for (input, line) in inputs.iter().zip(elixir_lines) {
+        let rust = parser
+            .parse(input)
+            .unwrap_or_else(|e| panic!("Rust rejected generated {input:?}: {}", e.reason));
+        let parts: Vec<&str> = line.split('|').collect();
+        assert_eq!(parts[0], "ok", "Elixir rejected generated {input:?}");
+        assert_eq!(parts[1], rust.rest, "rest mismatch for {input:?}");
+        assert_eq!(
+            parts[2].parse::<usize>().expect("offset"),
+            rust.cursor.byte_offset,
+            "offset mismatch for {input:?}"
+        );
+        assert_eq!(
+            parts[3].parse::<usize>().expect("count"),
+            rust.tokens.len(),
+            "token count mismatch for {input:?}"
+        );
+        assert_eq!(
+            parts[4],
+            format_tokens(&rust.tokens),
+            "token value mismatch for {input:?}"
+        );
+    }
 }
 
 fn assert_case(elixir: &[&str], rust: &nimble_parsec_rs::ParseSuccess<'_>) {
