@@ -439,39 +439,54 @@ pub fn generate_with(parser: &Parser, seed: u64, config: GenerateConfig) -> Stri
     generate_ast(&parser.ast, &mut rng, 0, &config)
 }
 
-/// Byte membership constraints for `ascii_char` and `ascii_string`, mirroring
-/// NimbleParsec's range list. An empty set accepts any ASCII byte.
+/// Membership constraints for a character class, mirroring NimbleParsec's range
+/// list (`min..max`, a codepoint, or their `{:not, ...}` negations). An empty
+/// set accepts any element. `T` is the element type — see the [`AsciiPredicate`]
+/// and [`Utf8Predicate`] aliases.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub enum AsciiPredicate {
-    /// Matches any ASCII byte.
+pub enum Predicate<T> {
+    /// Matches any element.
     Any,
-    /// Matches a byte within the inclusive range.
-    Range(RangeInclusive<u8>),
-    /// Matches exactly this byte.
-    Char(u8),
-    /// Excludes a byte within the inclusive range.
-    NotRange(RangeInclusive<u8>),
-    /// Excludes exactly this byte.
-    NotChar(u8),
+    /// Matches an element within the inclusive range.
+    Range(RangeInclusive<T>),
+    /// Matches exactly this element.
+    Char(T),
+    /// Excludes an element within the inclusive range.
+    NotRange(RangeInclusive<T>),
+    /// Excludes exactly this element.
+    NotChar(T),
 }
 
-/// Codepoint membership constraints for `utf8_char` and `utf8_string`,
-/// mirroring NimbleParsec's range list (`min..max`, a codepoint, or their
-/// `{:not, ...}` negations). An empty set accepts any codepoint.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum Utf8Predicate {
-    /// Matches any codepoint.
-    Any,
-    /// Matches a codepoint within the inclusive range.
-    Range(RangeInclusive<char>),
-    /// Matches exactly this codepoint.
-    Char(char),
-    /// Excludes a codepoint within the inclusive range.
-    NotRange(RangeInclusive<char>),
-    /// Excludes exactly this codepoint.
-    NotChar(char),
+/// Byte constraints for `ascii_char` and `ascii_string`.
+pub type AsciiPredicate = Predicate<u8>;
+
+/// Codepoint constraints for `utf8_char` and `utf8_string`.
+pub type Utf8Predicate = Predicate<char>;
+
+/// An element type that can appear in a [`Predicate`], supplying the label
+/// prefix and rendering used in failure messages.
+trait ClassElem: Copy + PartialOrd {
+    fn class_label() -> &'static str;
+    fn quote(self) -> String;
+}
+
+impl ClassElem for u8 {
+    fn class_label() -> &'static str {
+        "ASCII character"
+    }
+    fn quote(self) -> String {
+        quote_byte(self)
+    }
+}
+
+impl ClassElem for char {
+    fn class_label() -> &'static str {
+        "utf8 codepoint"
+    }
+    fn quote(self) -> String {
+        quote_char(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,14 +547,14 @@ pub fn string(lit: impl Into<Arc<str>>) -> Parser {
 /// Matches one ASCII byte satisfying `predicates`, emitting its codepoint as a
 /// [`Value::Int`]. An empty predicate set matches any ASCII byte.
 pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
-    let reason = format!("expected {}", describe_ascii(&predicates));
+    let reason = format!("expected {}", describe(&predicates));
     Parser::from_ast(Ast::AsciiChar { predicates, reason })
 }
 
 /// Matches one UTF-8 codepoint satisfying `predicates`, emitting it as a
 /// [`Value::Int`]. An empty predicate set matches any codepoint.
 pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
-    let reason = format!("expected {}", describe_utf8(&predicates));
+    let reason = format!("expected {}", describe(&predicates));
     Parser::from_ast(Ast::Utf8Char { predicates, reason })
 }
 
@@ -849,7 +864,7 @@ fn run_ast<'a>(
                     cursor,
                 });
             };
-            if b > 0x7f || !matches_ascii(b, predicates) {
+            if b > 0x7f || !matches(b, predicates) {
                 return Err(ParseFailure {
                     reason: reason.clone(),
                     rest: input,
@@ -877,7 +892,7 @@ fn run_ast<'a>(
                     cursor,
                 });
             };
-            if !matches_utf8(ch, predicates) {
+            if !matches(ch, predicates) {
                 return Err(ParseFailure {
                     reason: reason.clone(),
                     rest: input,
@@ -910,7 +925,7 @@ fn run_ast<'a>(
                         break;
                     }
                 }
-                if !matches_utf8(ch, predicates) {
+                if !matches(ch, predicates) {
                     break;
                 }
                 consumed_end = idx + ch.len_utf8();
@@ -951,7 +966,7 @@ fn run_ast<'a>(
                     }
                 }
                 let b = raw[i];
-                if b > 0x7f || !matches_ascii(b, predicates) {
+                if b > 0x7f || !matches(b, predicates) {
                     break;
                 }
                 i += 1;
@@ -1589,9 +1604,7 @@ fn gen_count(min: usize, max: Option<usize>, rng: &mut StdRng, config: &Generate
 }
 
 fn gen_ascii_byte(predicates: &[AsciiPredicate], rng: &mut StdRng) -> Option<u8> {
-    let candidates: Vec<u8> = (0u8..=0x7f)
-        .filter(|b| matches_ascii(*b, predicates))
-        .collect();
+    let candidates: Vec<u8> = (0u8..=0x7f).filter(|b| matches(*b, predicates)).collect();
     if candidates.is_empty() {
         None
     } else {
@@ -1614,7 +1627,7 @@ fn gen_utf8_char(predicates: &[Utf8Predicate], rng: &mut StdRng) -> Option<char>
     if candidates.is_empty() {
         candidates.extend(['a', 'b', 'c', '0', '9', ' ']);
     }
-    candidates.retain(|c| matches_utf8(*c, predicates));
+    candidates.retain(|c| matches(*c, predicates));
     if candidates.is_empty() {
         None
     } else {
@@ -1688,50 +1701,27 @@ fn compose_label(prefix: &str, inclusive: Vec<String>, exclusive: Vec<String>) -
     label
 }
 
-fn describe_ascii(predicates: &[AsciiPredicate]) -> String {
+fn describe<T: ClassElem>(predicates: &[Predicate<T>]) -> String {
     let mut inclusive = Vec::new();
     let mut exclusive = Vec::new();
     for p in predicates {
         match p {
-            AsciiPredicate::Any => {}
-            AsciiPredicate::Range(r) => inclusive.push(format!(
+            Predicate::Any => {}
+            Predicate::Range(r) => inclusive.push(format!(
                 "in the range {} to {}",
-                quote_byte(*r.start()),
-                quote_byte(*r.end())
+                (*r.start()).quote(),
+                (*r.end()).quote()
             )),
-            AsciiPredicate::Char(c) => inclusive.push(format!("equal to {}", quote_byte(*c))),
-            AsciiPredicate::NotRange(r) => exclusive.push(format!(
+            Predicate::Char(c) => inclusive.push(format!("equal to {}", (*c).quote())),
+            Predicate::NotRange(r) => exclusive.push(format!(
                 "in the range {} to {}",
-                quote_byte(*r.start()),
-                quote_byte(*r.end())
+                (*r.start()).quote(),
+                (*r.end()).quote()
             )),
-            AsciiPredicate::NotChar(c) => exclusive.push(format!("equal to {}", quote_byte(*c))),
+            Predicate::NotChar(c) => exclusive.push(format!("equal to {}", (*c).quote())),
         }
     }
-    compose_label("ASCII character", inclusive, exclusive)
-}
-
-fn describe_utf8(predicates: &[Utf8Predicate]) -> String {
-    let mut inclusive = Vec::new();
-    let mut exclusive = Vec::new();
-    for p in predicates {
-        match p {
-            Utf8Predicate::Any => {}
-            Utf8Predicate::Range(r) => inclusive.push(format!(
-                "in the range {} to {}",
-                quote_char(*r.start()),
-                quote_char(*r.end())
-            )),
-            Utf8Predicate::Char(c) => inclusive.push(format!("equal to {}", quote_char(*c))),
-            Utf8Predicate::NotRange(r) => exclusive.push(format!(
-                "in the range {} to {}",
-                quote_char(*r.start()),
-                quote_char(*r.end())
-            )),
-            Utf8Predicate::NotChar(c) => exclusive.push(format!("equal to {}", quote_char(*c))),
-        }
-    }
-    compose_label("utf8 codepoint", inclusive, exclusive)
+    compose_label(T::class_label(), inclusive, exclusive)
 }
 
 /// Shared positive/negative membership rule for character predicates.
@@ -1756,23 +1746,13 @@ fn matches_ranges(predicates: impl IntoIterator<Item = (bool, bool)>) -> bool {
     (!has_positive || positive_hit) && !negative_hit
 }
 
-fn matches_ascii(b: u8, predicates: &[AsciiPredicate]) -> bool {
+fn matches<T: ClassElem>(value: T, predicates: &[Predicate<T>]) -> bool {
     matches_ranges(predicates.iter().map(|p| match p {
-        AsciiPredicate::Any => (false, true),
-        AsciiPredicate::Range(r) => (false, r.contains(&b)),
-        AsciiPredicate::Char(c) => (false, *c == b),
-        AsciiPredicate::NotRange(r) => (true, r.contains(&b)),
-        AsciiPredicate::NotChar(c) => (true, *c == b),
-    }))
-}
-
-fn matches_utf8(ch: char, predicates: &[Utf8Predicate]) -> bool {
-    matches_ranges(predicates.iter().map(|p| match p {
-        Utf8Predicate::Any => (false, true),
-        Utf8Predicate::Range(r) => (false, r.contains(&ch)),
-        Utf8Predicate::Char(c) => (false, *c == ch),
-        Utf8Predicate::NotRange(r) => (true, r.contains(&ch)),
-        Utf8Predicate::NotChar(c) => (true, *c == ch),
+        Predicate::Any => (false, true),
+        Predicate::Range(r) => (false, r.contains(&value)),
+        Predicate::Char(c) => (false, *c == value),
+        Predicate::NotRange(r) => (true, r.contains(&value)),
+        Predicate::NotChar(c) => (true, *c == value),
     }))
 }
 
