@@ -69,7 +69,7 @@ Status legend:
 | `post_traverse` / `pre_traverse` | `post_traverse` / `pre_traverse` | ✅ | Context is threaded through combinators; the callback receives results, context, and position. |
 | `quoted_post_traverse` / `quoted_pre_traverse` | — | ❌ | Compile-time traversal variants. |
 | `quoted_repeat_while` | — | ❌ | Compile-time `repeat_while` variant. |
-| `parsec` | — | ❌ | Local/remote combinator references (named-parser registry, recursion). |
+| `parsec` | `ParserRef` / `recursive` | ✅ | Forward-declarable references for recursive grammars (runtime, not module-level names). |
 | `generate` | — | ❌ | Random input generation from a parser. |
 | `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `compile_parser!` | ⚠️ | Codegen entry points; the Rust proc-macro is a passthrough scaffold with no specialization yet. |
 
@@ -79,11 +79,16 @@ The full runtime combinator surface is ported: primitives, control flow,
 transforms/tagging, error labeling, and position metadata. The remaining ❌
 rows are not drop-in combinators but four larger design efforts:
 
-1. **Combinator references** (`parsec`) — needs a named-parser registry to
-   support recursion and modular grammars.
-2. **Generators** (`generate`) — random input synthesis from a parser.
-3. **Compile-time code generation** (`defparsec` family) — the proc-macro
+1. **Generators** (`generate`) — random input synthesis from a parser. Blocked
+   by the closure-based design: a `Parser` is an opaque function with no
+   introspectable structure to generate from.
+2. **Compile-time code generation** (`defparsec` family) — the proc-macro
    specialization that gives NimbleParsec its performance.
 
+Both require reifying parsers as an inspectable data structure (an AST) rather
+than opaque closures — a separate architectural initiative.
+
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
-the now-ported runtime `post_traverse`/`pre_traverse`.
+the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
+runtime forward reference (`ParserRef`/`recursive`) rather than module-level
+named parsers, which belong with codegen.

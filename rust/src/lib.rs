@@ -933,6 +933,57 @@ pub fn debug(parser: Parser) -> Parser {
     })
 }
 
+/// A forward-declarable parser reference enabling recursive grammars, mirroring
+/// NimbleParsec's `parsec`. Create one, use [`ParserRef::parser`] inside a
+/// definition, then supply that definition with [`ParserRef::define`]. Cloning a
+/// `ParserRef` shares the same underlying definition.
+///
+/// Left recursion is not supported (it loops forever, as in any recursive
+/// descent parser); only recurse after consuming input.
+#[derive(Clone, Default)]
+pub struct ParserRef {
+    cell: Arc<std::sync::OnceLock<Parser>>,
+}
+
+impl ParserRef {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a parser that resolves to the referenced definition at parse
+    /// time. Panics if run before [`ParserRef::define`].
+    pub fn parser(&self) -> Parser {
+        let cell = Arc::clone(&self.cell);
+        Parser::new(move |input, cursor, context| {
+            let parser = cell
+                .get()
+                .expect("parsec reference used before it was defined");
+            parser.run(input, cursor, context)
+        })
+    }
+
+    /// Supplies the referenced definition. Must be called exactly once.
+    pub fn define(&self, parser: Parser) {
+        self.cell
+            .set(parser)
+            .ok()
+            .expect("parsec reference was already defined");
+    }
+}
+
+/// Builds a recursive parser. `build` receives a reference to the parser being
+/// defined (usable within the returned definition) and returns that definition.
+/// Convenience wrapper over [`ParserRef`].
+pub fn recursive<F>(build: F) -> Parser
+where
+    F: FnOnce(Parser) -> Parser,
+{
+    let reference = ParserRef::new();
+    let definition = build(reference.parser());
+    reference.define(definition);
+    reference.parser()
+}
+
 /// Shared positive/negative membership rule for character predicates.
 ///
 /// Each item is `(is_negative, contains)`. A value is accepted when it hits at

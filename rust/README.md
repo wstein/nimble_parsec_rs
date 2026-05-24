@@ -29,6 +29,7 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
   - `label` (custom failure messages)
   - `line`, `byte_offset` (position metadata)
   - `debug` (prints parser state to stderr)
+  - `ParserRef` / `recursive` (forward references for recursive grammars)
 
   ## Benchmark scaffold
 
@@ -46,7 +47,6 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
 ## Not Yet Ported
 
 - Compile-time parser generation equivalent to `defparsec/defcombinator`
-- `parsec` (local/remote combinator references)
 - Generator support (`generate/1`) and metadata export
 - Exact error-message wording parity with NimbleParsec
 
