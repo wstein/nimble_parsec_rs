@@ -1,4 +1,6 @@
-use nimble_parsec_rs::{choice, label, string, Value};
+use nimble_parsec_rs::{
+    ascii_char, choice, label, string, utf8_char, AsciiPredicate, Utf8Predicate, Value,
+};
 
 #[test]
 fn label_overrides_failure_message() {
@@ -25,4 +27,37 @@ fn choice_aggregates_branch_failures() {
     let err = parser.parse("xyz").expect_err("all branches should fail");
     assert_eq!(err.reason, "expected a foo or expected a bar");
     assert_eq!(err.rest, "xyz");
+}
+
+#[test]
+fn ascii_char_reports_allowed_range() {
+    let parser = ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]);
+    let err = parser.parse("x").expect_err("non-digit should fail");
+    assert_eq!(
+        err.reason,
+        "expected ASCII character in the range \"0\" to \"9\""
+    );
+}
+
+#[test]
+fn ascii_char_reports_negated_constraints() {
+    let parser = ascii_char(vec![
+        AsciiPredicate::Range(b'0'..=b'9'),
+        AsciiPredicate::NotChar(b'3'),
+    ]);
+    let err = parser.parse("3").expect_err("excluded digit should fail");
+    assert_eq!(
+        err.reason,
+        "expected ASCII character in the range \"0\" to \"9\", and not equal to \"3\""
+    );
+}
+
+#[test]
+fn utf8_char_reports_allowed_range() {
+    let parser = utf8_char(vec![Utf8Predicate::Range('a'..='z')]);
+    let err = parser.parse("0").expect_err("non-letter should fail");
+    assert_eq!(
+        err.reason,
+        "expected utf8 codepoint in the range \"a\" to \"z\""
+    );
 }

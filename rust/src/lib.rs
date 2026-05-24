@@ -197,10 +197,12 @@ pub fn string(lit: &'static str) -> Parser {
 }
 
 pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
+    // Built once at construction; failures are hot inside choice/repeat.
+    let reason = format!("expected {}", describe_ascii(&predicates));
     Parser::new(move |input, cursor, context| {
         let Some(&b) = input.as_bytes().first() else {
             return Err(ParseFailure {
-                reason: "expected ASCII character".to_string(),
+                reason: reason.clone(),
                 rest: input,
                 cursor,
             });
@@ -208,7 +210,7 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
 
         if b > 0x7f {
             return Err(ParseFailure {
-                reason: "expected ASCII character".to_string(),
+                reason: reason.clone(),
                 rest: input,
                 cursor,
             });
@@ -216,7 +218,7 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
 
         if !matches_ascii(b, &predicates) {
             return Err(ParseFailure {
-                reason: "expected ASCII character in allowed range".to_string(),
+                reason: reason.clone(),
                 rest: input,
                 cursor,
             });
@@ -235,10 +237,12 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
 }
 
 pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
+    // Built once at construction; failures are hot inside choice/repeat.
+    let reason = format!("expected {}", describe_utf8(&predicates));
     Parser::new(move |input, cursor, context| {
         let Some(ch) = input.chars().next() else {
             return Err(ParseFailure {
-                reason: "expected utf8 codepoint".to_string(),
+                reason: reason.clone(),
                 rest: input,
                 cursor,
             });
@@ -246,7 +250,7 @@ pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
 
         if !matches_utf8(ch, &predicates) {
             return Err(ParseFailure {
-                reason: "expected utf8 codepoint in allowed range".to_string(),
+                reason: reason.clone(),
                 rest: input,
                 cursor,
             });
@@ -1004,6 +1008,87 @@ fn matches_ranges(predicates: impl IntoIterator<Item = (bool, bool)>) -> bool {
     }
 
     (!has_positive || positive_hit) && !negative_hit
+}
+
+/// Renders a printable byte as `"x"` (matching Elixir's `inspect/1` of a
+/// one-character binary) or, for control bytes, as `byte N`.
+fn quote_byte(b: u8) -> String {
+    if b.is_ascii_graphic() || b == b' ' {
+        format!("\"{}\"", b as char)
+    } else {
+        format!("byte {b}")
+    }
+}
+
+/// Renders a printable codepoint as `"x"`, or a control codepoint as
+/// `codepoint N`.
+fn quote_char(c: char) -> String {
+    if c.is_control() {
+        format!("codepoint {}", c as u32)
+    } else {
+        format!("\"{c}\"")
+    }
+}
+
+/// Composes a NimbleParsec-style label: `<prefix> <incl> or <incl>, and not
+/// <excl>`. An empty constraint set yields just the prefix.
+fn compose_label(prefix: &str, inclusive: Vec<String>, exclusive: Vec<String>) -> String {
+    let mut label = prefix.to_string();
+    if !inclusive.is_empty() {
+        label.push(' ');
+        label.push_str(&inclusive.join(" or "));
+    }
+    for excl in exclusive {
+        label.push_str(", and not ");
+        label.push_str(&excl);
+    }
+    label
+}
+
+fn describe_ascii(predicates: &[AsciiPredicate]) -> String {
+    let mut inclusive = Vec::new();
+    let mut exclusive = Vec::new();
+    for p in predicates {
+        match p {
+            AsciiPredicate::Any => {}
+            AsciiPredicate::Range(r) => inclusive.push(format!(
+                "in the range {} to {}",
+                quote_byte(*r.start()),
+                quote_byte(*r.end())
+            )),
+            AsciiPredicate::Char(c) => inclusive.push(format!("equal to {}", quote_byte(*c))),
+            AsciiPredicate::NotRange(r) => exclusive.push(format!(
+                "in the range {} to {}",
+                quote_byte(*r.start()),
+                quote_byte(*r.end())
+            )),
+            AsciiPredicate::NotChar(c) => exclusive.push(format!("equal to {}", quote_byte(*c))),
+        }
+    }
+    compose_label("ASCII character", inclusive, exclusive)
+}
+
+fn describe_utf8(predicates: &[Utf8Predicate]) -> String {
+    let mut inclusive = Vec::new();
+    let mut exclusive = Vec::new();
+    for p in predicates {
+        match p {
+            Utf8Predicate::Any => {}
+            Utf8Predicate::Range(r) => inclusive.push(format!(
+                "in the range {} to {}",
+                quote_char(*r.start()),
+                quote_char(*r.end())
+            )),
+            Utf8Predicate::Char(c) => inclusive.push(format!("equal to {}", quote_char(*c))),
+            Utf8Predicate::NotRange(r) => exclusive.push(format!(
+                "in the range {} to {}",
+                quote_char(*r.start()),
+                quote_char(*r.end())
+            )),
+            Utf8Predicate::NotChar(c) => exclusive.push(format!("equal to {}", quote_char(*c))),
+        }
+    }
+    compose_label("utf8 codepoint", inclusive, exclusive)
 }
 
 fn matches_ascii(b: u8, predicates: &[AsciiPredicate]) -> bool {

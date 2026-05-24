@@ -48,7 +48,10 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
 
 - Compile-time parser generation equivalent to `defparsec/defcombinator`
 - Generator support (`generate/1`) and metadata export
-- Exact error-message wording parity with NimbleParsec
+
+Error messages follow NimbleParsec's phrasing (e.g. `expected ASCII character in
+the range "0" to "9"`), but exact `inspect` escaping of non-printable codepoints
+and `integer`'s composite "followed by" message are not byte-identical.
 
 ## Why this split
 
