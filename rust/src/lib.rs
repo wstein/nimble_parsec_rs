@@ -139,7 +139,60 @@ enum Ast {
     Reference(Arc<OnceLock<Arc<Ast>>>),
 }
 
-#[derive(Clone)]
+impl std::fmt::Debug for Ast {
+    /// Structural debug rendering. Embedded closures print as `<fn>`, and
+    /// references are not followed (they print as `Reference(<ref>)`) so the
+    /// output stays finite for recursive grammars.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ast::Empty => write!(f, "Empty"),
+            Ast::Fail(reason) => write!(f, "Fail({reason:?})"),
+            Ast::Str(lit) => write!(f, "Str({lit:?})"),
+            Ast::AsciiChar { predicates, .. } => write!(f, "AsciiChar({predicates:?})"),
+            Ast::Utf8Char { predicates, .. } => write!(f, "Utf8Char({predicates:?})"),
+            Ast::Utf8String {
+                predicates,
+                min,
+                max,
+            } => write!(f, "Utf8String({predicates:?}, {min}, {max:?})"),
+            Ast::AsciiString {
+                predicates,
+                min,
+                max,
+            } => write!(f, "AsciiString({predicates:?}, {min}, {max:?})"),
+            Ast::Bytes(n) => write!(f, "Bytes({n})"),
+            Ast::Eos => write!(f, "Eos"),
+            Ast::Integer { min, max } => write!(f, "Integer({min}, {max:?})"),
+            Ast::Concat(left, right) => write!(f, "Concat({left:?}, {right:?})"),
+            Ast::Ignore(inner) => write!(f, "Ignore({inner:?})"),
+            Ast::Optional(inner) => write!(f, "Optional({inner:?})"),
+            Ast::Choice(choices) => f.debug_tuple("Choice").field(choices).finish(),
+            Ast::Repeat { inner, min, max } => write!(f, "Repeat({inner:?}, {min}, {max:?})"),
+            Ast::Duplicate { inner, n } => write!(f, "Duplicate({inner:?}, {n})"),
+            Ast::Eventually(inner) => write!(f, "Eventually({inner:?})"),
+            Ast::Lookahead(inner) => write!(f, "Lookahead({inner:?})"),
+            Ast::LookaheadNot(inner) => write!(f, "LookaheadNot({inner:?})"),
+            Ast::RepeatWhile {
+                inner, min, max, ..
+            } => write!(f, "RepeatWhile({inner:?}, {min}, {max:?}, <fn>)"),
+            Ast::Map(inner, _) => write!(f, "Map({inner:?}, <fn>)"),
+            Ast::Reduce(inner, _) => write!(f, "Reduce({inner:?}, <fn>)"),
+            Ast::Tag(name, inner) => write!(f, "Tag({name:?}, {inner:?})"),
+            Ast::UnwrapAndTag(name, inner) => write!(f, "UnwrapAndTag({name:?}, {inner:?})"),
+            Ast::Wrap(inner) => write!(f, "Wrap({inner:?})"),
+            Ast::Replace(inner, value) => write!(f, "Replace({inner:?}, {value:?})"),
+            Ast::Label(inner, label) => write!(f, "Label({inner:?}, {label:?})"),
+            Ast::ByteOffset(inner) => write!(f, "ByteOffset({inner:?})"),
+            Ast::Line(inner) => write!(f, "Line({inner:?})"),
+            Ast::Debug(inner) => write!(f, "Debug({inner:?})"),
+            Ast::PostTraverse(inner, _) => write!(f, "PostTraverse({inner:?}, <fn>)"),
+            Ast::PreTraverse(inner, _) => write!(f, "PreTraverse({inner:?}, <fn>)"),
+            Ast::Reference(_) => write!(f, "Reference(<ref>)"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Parser {
     ast: Arc<Ast>,
 }
@@ -187,7 +240,6 @@ impl ParserRef {
     pub fn define(&self, parser: Parser) {
         self.cell
             .set(parser.ast)
-            .ok()
             .expect("parsec reference was already defined");
     }
 }
