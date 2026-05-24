@@ -19,7 +19,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `choice`
   - `repeat(min, max)`, `repeat_while`, `times`
   - `lookahead`, `lookahead_not`
-  - `map`
+  - `map` (per element), `reduce` (all results into one)
   - `tag`
 
   ## Benchmark scaffold

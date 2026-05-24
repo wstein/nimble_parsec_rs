@@ -524,14 +524,31 @@ where
     })
 }
 
+/// Maps `f` over each result token individually, like NimbleParsec's `map`.
 pub fn map<F>(parser: Parser, f: F) -> Parser
 where
-    F: Fn(Vec<Value>) -> Vec<Value> + Send + Sync + 'static,
+    F: Fn(Value) -> Value + Send + Sync + 'static,
 {
     Parser::new(move |input, cursor| {
         let ok = parser.run(input, cursor)?;
         Ok(ParseSuccess {
-            tokens: f(ok.tokens),
+            tokens: ok.tokens.into_iter().map(&f).collect(),
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
+/// Reduces all result tokens into a single token via `f`, like NimbleParsec's
+/// `reduce`.
+pub fn reduce<F>(parser: Parser, f: F) -> Parser
+where
+    F: Fn(Vec<Value>) -> Value + Send + Sync + 'static,
+{
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        Ok(ParseSuccess {
+            tokens: vec![f(ok.tokens)],
             rest: ok.rest,
             cursor: ok.cursor,
         })

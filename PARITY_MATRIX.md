@@ -48,8 +48,8 @@ Status legend:
 | `tag` | `tag` | ✅ | Wraps results in a tagged list. |
 | `unwrap_and_tag` | — | ❌ | Tags a single result; errors if not exactly one. |
 | `ignore` | `ignore` | ✅ | |
-| `map` | `map` | ⚠️ | Rust `map` takes the whole token list (`Vec → Vec`); Elixir `map` is per-element. The whole-list form is really `reduce`. |
-| `reduce` | — | ❌ | Effectively available as Rust's `map`, but unnamed and conflated. |
+| `map` | `map` | ✅ | Per-element transform (`Value → Value`). |
+| `reduce` | `reduce` | ✅ | Reduces all results into a single value (`Vec<Value> → Value`). |
 | `wrap` | — | ❌ | Wrap results in a single list value. |
 | `replace` | — | ❌ | Replace results with a constant value. |
 | `label` | — | ❌ | Override the failure message. |

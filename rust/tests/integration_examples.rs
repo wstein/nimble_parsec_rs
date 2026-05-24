@@ -1,5 +1,5 @@
 use nimble_parsec_rs::{
-    ascii_char, concat, ignore, integer_exact, integer_min, map, optional, string, tag,
+    ascii_char, concat, ignore, integer_exact, integer_min, optional, reduce, string, tag,
     utf8_string, AsciiPredicate, Cursor, Value,
 };
 use num_bigint::BigInt;
@@ -67,14 +67,13 @@ fn signed_int_with_optional_sign_and_tag() {
     let sign = optional(ascii_char(vec![AsciiPredicate::Char(b'-')]));
     let core = concat(sign, integer_min(1));
 
-    let mapped = map(core, |tokens| match tokens.as_slice() {
-        [Value::Int(sign), Value::Int(v)] if *sign == BigInt::from(b'-') => {
-            vec![Value::Int(-v)]
-        }
-        _ => tokens,
+    let reduced = reduce(core, |tokens| match tokens.as_slice() {
+        [Value::Int(sign), Value::Int(v)] if *sign == BigInt::from(b'-') => Value::Int(-v),
+        [Value::Int(v)] => Value::Int(v.clone()),
+        _ => unreachable!("signed_int parser yields one or two integer tokens"),
     });
 
-    let parser = tag("signed_int", mapped);
+    let parser = tag("signed_int", reduced);
 
     let ok_neg = parser.parse("-1").expect("negative should parse");
     assert_eq!(
