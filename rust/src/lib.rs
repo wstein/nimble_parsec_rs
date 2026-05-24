@@ -948,7 +948,7 @@ pub fn debug(parser: Parser) -> Parser {
 pub mod __private {
     use super::{
         advance, describe, AsciiPredicate, Ast, Context, Cursor, Integer, ParseResult, Parser,
-        Utf8Predicate, Value,
+        RepeatWhileControl, Utf8Predicate, Value,
     };
     use std::sync::Arc;
 
@@ -957,6 +957,28 @@ pub mod __private {
     /// generated code cannot infer on its own.
     pub fn reduce_with<F: Fn(Vec<Value>) -> Value>(f: F, tokens: Vec<Value>) -> Value {
         f(tokens)
+    }
+
+    /// Applies a generated `repeat_while` predicate, pinning its parameter types.
+    pub fn eval_while<F>(f: F, rest: &str, cursor: Cursor, context: &Context) -> RepeatWhileControl
+    where
+        F: Fn(&str, Cursor, &Context) -> RepeatWhileControl,
+    {
+        f(rest, cursor, context)
+    }
+
+    /// Applies a generated `post_traverse`/`pre_traverse` callback, pinning its
+    /// parameter types.
+    pub fn apply_traverse<F>(
+        f: F,
+        tokens: Vec<Value>,
+        context: Context,
+        cursor: Cursor,
+    ) -> Result<(Vec<Value>, Context), String>
+    where
+        F: Fn(Vec<Value>, Context, Cursor) -> Result<(Vec<Value>, Context), String>,
+    {
+        f(tokens, context, cursor)
     }
 
     /// Parses a non-empty run of ASCII digits into an [`Integer`] (small-value

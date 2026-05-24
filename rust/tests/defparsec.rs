@@ -377,3 +377,109 @@ fn compile_parser_repeat_matches_runtime() {
         &["abab", "ab", "x"],
     );
 }
+
+// ---------------------------------------------------------------------------
+// duplicate / eventually / repeat_while / traversal codegen parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_duplicate_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, duplicate};
+
+    let p = compile_parser!(duplicate(string("ab"), 3));
+    assert_parity(
+        &p,
+        &duplicate(string("ab"), 3),
+        &["ababab!", "abab", "x", ""],
+    );
+}
+
+#[test]
+fn compile_parser_eventually_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, eventually};
+
+    let p = compile_parser!(eventually(integer_min(1)));
+    assert_parity(
+        &p,
+        &eventually(integer_min(1)),
+        &["abc12!", "12", "abc", ""],
+    );
+}
+
+#[test]
+fn compile_parser_repeat_while_matches_runtime() {
+    use nimble_parsec_rs::{
+        ascii_char, compile_parser, repeat_while, AsciiPredicate, RepeatWhileControl,
+    };
+
+    fn pair() -> nimble_parsec_rs::Parser {
+        concat(
+            ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
+            ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
+        )
+    }
+    let p = compile_parser!(repeat_while(
+        concat(
+            ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
+            ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')])
+        ),
+        |rest, _, _| if rest.starts_with('3') {
+            RepeatWhileControl::Halt
+        } else {
+            RepeatWhileControl::Cont
+        },
+        0,
+        None
+    ));
+    let rt = repeat_while(
+        pair(),
+        |rest, _, _| {
+            if rest.starts_with('3') {
+                RepeatWhileControl::Halt
+            } else {
+                RepeatWhileControl::Cont
+            }
+        },
+        0,
+        None,
+    );
+    assert_parity(&p, &rt, &["12345", "1234", "31", ""]);
+}
+
+#[test]
+fn compile_parser_traversals_match_runtime() {
+    use nimble_parsec_rs::{compile_parser, post_traverse, pre_traverse, Value};
+
+    // post_traverse: result depends on the trailing position.
+    let post = compile_parser!(post_traverse(integer_min(1), |_tokens, ctx, cursor| {
+        Ok((
+            vec![Value::Int(Integer::from(cursor.byte_offset as i64))],
+            ctx,
+        ))
+    }));
+    let post_rt = post_traverse(integer_min(1), |_tokens, ctx, cursor| {
+        Ok((
+            vec![Value::Int(Integer::from(cursor.byte_offset as i64))],
+            ctx,
+        ))
+    });
+    assert_parity(&post, &post_rt, &["123", "x"]);
+
+    // pre_traverse: result depends on the leading position.
+    let pre = compile_parser!(pre_traverse(integer_min(1), |mut tokens, ctx, cursor| {
+        tokens.push(Value::Int(Integer::from(cursor.byte_offset as i64)));
+        Ok((tokens, ctx))
+    }));
+    let pre_rt = pre_traverse(integer_min(1), |mut tokens, ctx, cursor| {
+        tokens.push(Value::Int(Integer::from(cursor.byte_offset as i64)));
+        Ok((tokens, ctx))
+    });
+    assert_parity(&pre, &pre_rt, &["123", "x"]);
+
+    // A callback that fails must error identically.
+    let failing = compile_parser!(post_traverse(integer_min(1), |_t, _c, _cur| Err(
+        "nope".to_string()
+    )));
+    let failing_rt = post_traverse(integer_min(1), |_t, _c, _cur| Err("nope".to_string()));
+    assert_parity(&failing, &failing_rt, &["1", "x"]);
+}

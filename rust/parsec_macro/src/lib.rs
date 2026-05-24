@@ -710,6 +710,180 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             }})
         }
 
+        // -- duplicate ----------------------------------------------------
+        // Exactly N sequential repetitions; any failure aborts (the inner's
+        // `return Err` propagates), so no recovery closure is needed.
+        "duplicate" if args.len() == 2 => {
+            let n = &args[1];
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                for _ in 0..#n {
+                    #inner
+                }
+            }})
+        }
+
+        // -- eventually ---------------------------------------------------
+        // Skip one codepoint at a time until the inner matches (run in a
+        // closure to catch its failure); the skipped prefix is discarded.
+        "eventually" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                let __ev_input = __input;
+                let __ev_cursor = __cursor;
+                loop {
+                    let __try_input = __input;
+                    let __try_cursor = __cursor;
+                    let __try_ctx = __context.clone();
+                    let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                        let mut __input = __try_input;
+                        let mut __cursor = __try_cursor;
+                        let mut __context = __try_ctx;
+                        let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                            ::std::vec::Vec::new();
+                        #inner
+                        Ok(::nimble_parsec_rs::ParseSuccess {
+                            tokens: __tokens,
+                            rest: __input,
+                            cursor: __cursor,
+                            context: __context,
+                        })
+                    })();
+                    if let Ok(__ok) = __r {
+                        __tokens.extend(__ok.tokens);
+                        __input = __ok.rest;
+                        __cursor = __ok.cursor;
+                        __context = __ok.context;
+                        break;
+                    }
+                    match __input.chars().next() {
+                        ::std::option::Option::Some(__ch) => {
+                            let __consumed = &__input[..__ch.len_utf8()];
+                            __cursor = ::nimble_parsec_rs::__private::advance_cursor(
+                                __cursor, __consumed,
+                            );
+                            __input = &__input[__ch.len_utf8()..];
+                        }
+                        ::std::option::Option::None => {
+                            return Err(::nimble_parsec_rs::ParseFailure {
+                                reason: "expected combinator to eventually match".to_string(),
+                                rest: __ev_input,
+                                cursor: __ev_cursor,
+                            });
+                        }
+                    }
+                }
+            }})
+        }
+
+        // -- repeat_while -------------------------------------------------
+        // Like `repeat`, but the predicate (run via the eval_while helper to
+        // pin its parameter types) gates each iteration, and an inner failure
+        // simply stops the loop (it is not propagated below `min`).
+        "repeat_while" if args.len() == 4 => {
+            let while_fn = &args[1];
+            let min = &args[2];
+            let max = &args[3];
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                let __min: usize = #min;
+                let __max_opt: ::std::option::Option<usize> = #max;
+                let mut __count: usize = 0;
+                loop {
+                    if let ::std::option::Option::Some(__max) = __max_opt {
+                        if __count >= __max {
+                            break;
+                        }
+                    }
+                    match ::nimble_parsec_rs::__private::eval_while(
+                        #while_fn, __input, __cursor, &__context,
+                    ) {
+                        ::nimble_parsec_rs::RepeatWhileControl::Halt => break,
+                        ::nimble_parsec_rs::RepeatWhileControl::Cont => {}
+                    }
+                    let __it_input = __input;
+                    let __it_cursor = __cursor;
+                    let __it_ctx = __context.clone();
+                    let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                        let mut __input = __it_input;
+                        let mut __cursor = __it_cursor;
+                        let mut __context = __it_ctx;
+                        let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                            ::std::vec::Vec::new();
+                        #inner
+                        Ok(::nimble_parsec_rs::ParseSuccess {
+                            tokens: __tokens,
+                            rest: __input,
+                            cursor: __cursor,
+                            context: __context,
+                        })
+                    })();
+                    match __r {
+                        Ok(__ok) => {
+                            if __ok.rest.len() == __input.len() {
+                                break;
+                            }
+                            __tokens.extend(__ok.tokens);
+                            __input = __ok.rest;
+                            __cursor = __ok.cursor;
+                            __context = __ok.context;
+                            __count += 1;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if __count < __min {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "repeat_while did not reach minimum repetitions".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+            }})
+        }
+
+        // -- post_traverse / pre_traverse ---------------------------------
+        // Run the inner (real tokens), then call the callback (via the
+        // apply_traverse helper) with the drained tokens, threaded context, and
+        // position (after for post, before for pre). The new context always
+        // propagates; the new tokens are emitted only when not discarded.
+        "post_traverse" | "pre_traverse" if args.len() == 2 => {
+            let f = &args[1];
+            let inner = codegen_impl(&args[0], false)?;
+            let (pre_capture, position) = if name == "pre_traverse" {
+                (quote!(let __pre_cursor = __cursor;), quote!(__pre_cursor))
+            } else {
+                (quote!(), quote!(__cursor))
+            };
+            let emit = if ignored {
+                quote! { let _ = __new_tokens; }
+            } else {
+                quote! { __tokens.extend(__new_tokens); }
+            };
+            Some(quote! {{
+                #pre_capture
+                let __start = __tokens.len();
+                #inner
+                let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                    __tokens.split_off(__start);
+                let (__new_tokens, __new_context) =
+                    match ::nimble_parsec_rs::__private::apply_traverse(
+                        #f, __drained, __context, #position,
+                    ) {
+                        Ok(__x) => __x,
+                        Err(__reason) => {
+                            return Err(::nimble_parsec_rs::ParseFailure {
+                                reason: __reason,
+                                rest: __input,
+                                cursor: __cursor,
+                            });
+                        }
+                    };
+                __context = __new_context;
+                #emit
+            }})
+        }
+
         _ => None,
     }
 }
