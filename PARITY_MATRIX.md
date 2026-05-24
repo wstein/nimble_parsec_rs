@@ -71,7 +71,8 @@ Status legend:
 | `quoted_repeat_while` | — | ❌ | Compile-time `repeat_while` variant. |
 | `parsec` | `ParserRef` / `recursive` | ✅ | Forward-declarable references for recursive grammars (runtime, not module-level names). |
 | `generate` | `generate` | ✅ | Seeded random input synthesis by walking the AST; round-trips for non-recursive grammars. |
-| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `compile_parser!` | ⚠️ | Codegen entry points; the Rust proc-macro is a passthrough scaffold with no specialization yet. |
+| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `defparsec!` / `defparsecp!` / `defcombinator!` / `defcombinatorp!` | ✅ | Named parse functions and combinator factories. `defparsec!`/`defparsecp!` generate specialized inline code for the codegen-supported subset (`string`, `integer_exact`, `integer_min`, `ignore`, `concat`, `empty`, `eos`); otherwise cache the runtime `Parser` in a `OnceLock`. `defcombinator!`/`defcombinatorp!` always cache via `OnceLock`. |
+| `defparsec` (inline use) | `compile_parser!` | ✅ | Generates a specialized `Parser` backed by a native closure for fully-recognizable expressions; falls back to the unchanged runtime expression otherwise. |
 
 ## Summary
 
@@ -80,10 +81,15 @@ transforms/tagging, error labeling, position metadata, recursion, and random
 generation. `Parser` is now a reified `Ast` walked by an interpreter, so the
 grammar is introspectable — which is what unblocked `generate`.
 
-The one remaining ❌ of substance is **compile-time code generation** (the
-`defparsec` family / specializing `compile_parser!`): emitting specialized Rust
-for a grammar at compile time. The AST makes this tractable, but benchmarking
-(see "Codegen verdict" below) shows it is not the highest-leverage next step.
+The `defparsec!`/`defparsecp!`/`defcombinator!`/`defcombinatorp!` macro family
+is now implemented. `defparsec!`/`defparsecp!` emit specialized inline Rust (no
+`Ast` interpreter, no intermediate `Vec`s) for the codegen-supported combinator
+subset (`string`, `integer_exact`, `integer_min`, `ignore`, `concat`, `empty`,
+`eos`); grammars using combinators outside that subset fall back to a
+`OnceLock`-cached runtime parser. `compile_parser!` follows the same strategy,
+wrapping the generated code in an `Ast::Native` closure. `defcombinator!`/
+`defcombinatorp!` always use `OnceLock`-cached runtime parsers and return a
+clonable `Parser`.
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
