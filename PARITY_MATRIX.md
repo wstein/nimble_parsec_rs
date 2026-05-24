@@ -98,22 +98,24 @@ named parsers, which belong with codegen.
 
 ## Codegen verdict (measured)
 
-`rust/benches/parser_bench.rs` benchmarks the datetime grammar three ways
+`rust/benches/parser_bench.rs` benchmarks the datetime grammar four ways
 (representative numbers on one machine — run `cargo bench` for your own):
 
 | Variant | Time | Notes |
 | --- | --- | --- |
-| Interpreter (combinators) | ~1.36 µs | current `Parser::parse` |
-| Hand-written, same tokens | ~0.42 µs | the *fair* codegen ceiling (still allocates the 6 `BigInt`s + `Vec`) |
+| Interpreter (combinators) | ~1.38 µs | `Parser::parse` walking the `Ast` |
+| **Specialized `compile_parser!`** | **~0.56 µs** | generated inline code (`Ast::Native`), emits identical tokens |
+| Hand-written, same tokens | ~0.43 µs | the *fair* codegen ceiling (still allocates the 6 `BigInt`s + `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
 
-A `compile_parser!` specializer must emit **identical tokens**, so its ceiling
-is the middle row, not the bottom. The ~0.9 µs gap between the interpreter and
-that ceiling is dominated by **avoidable allocations** — `string("-")` under
-`ignore` still allocates a `Value::Str` that is immediately discarded (7 such
-throwaways here), plus intermediate per-combinator `Vec`s — not by AST match
-dispatch. So the higher-leverage, lower-risk optimizations come first: teach
-`ignore` to suppress inner-token allocation, reduce intermediate `Vec`s, and
-consider a small-integer token representation. Codegen specialization is
-deferred: it carries high proc-macro complexity and token-divergence risk for a
-speedup an optimized interpreter would largely capture anyway.
+Codegen specialization is **implemented for the recognizable subset** (`string`,
+`integer_exact`, `integer_min`, `ignore`, `concat`, `empty`, `eos`); broader
+combinator coverage is future work. A specializer must emit **identical
+tokens**, so its ceiling is the third row, not the bottom — and the generated
+code already lands at ~0.56 µs, about **2.5× faster than the interpreter** and
+within ~30% of that fair ceiling. The remaining gap is dominated by the
+unavoidable token allocations (6 `BigInt`s + a `Vec`); `ignore`d
+sub-combinators no longer allocate throwaway tokens in the generated path. The
+complementary, lower-risk win for the *interpreter* path is to teach `ignore`
+to suppress inner-token allocation there too, plus a small-integer token
+representation.
