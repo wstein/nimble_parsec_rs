@@ -24,6 +24,7 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
   - `eventually`
   - `lookahead`, `lookahead_not`
   - `map` (per element), `reduce` (all results into one)
+  - `post_traverse`, `pre_traverse` (low-level result/context transforms)
   - `tag`, `unwrap_and_tag`, `wrap`, `replace`
   - `label` (custom failure messages)
   - `line`, `byte_offset` (position metadata)
@@ -45,10 +46,9 @@ parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
 ## Not Yet Ported
 
 - Compile-time parser generation equivalent to `defparsec/defcombinator`
-- `post_traverse`, `pre_traverse`
 - `parsec` (local/remote combinator references)
 - Generator support (`generate/1`) and metadata export
-- Error message parity with NimbleParsec's detailed labels
+- Exact error-message wording parity with NimbleParsec
 
 ## Why this split
 

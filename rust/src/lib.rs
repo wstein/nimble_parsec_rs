@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
@@ -37,11 +38,18 @@ pub enum Value {
     KeyValue(String, Box<Value>),
 }
 
+/// User-defined parser context threaded forward through successful parses,
+/// mirroring NimbleParsec's context map. It is read and updated by
+/// `post_traverse`/`pre_traverse`. On failure the caller backtracks with its
+/// own context, so [`ParseFailure`] does not carry one.
+pub type Context = HashMap<String, Value>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseSuccess<'a> {
     pub tokens: Vec<Value>,
     pub rest: &'a str,
     pub cursor: Cursor,
+    pub context: Context,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +61,7 @@ pub struct ParseFailure<'a> {
 
 pub type ParseResult<'a> = Result<ParseSuccess<'a>, ParseFailure<'a>>;
 
-type ParserFn = dyn for<'a> Fn(&'a str, Cursor) -> ParseResult<'a> + Send + Sync;
+type ParserFn = dyn for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Send + Sync;
 
 #[derive(Clone)]
 pub struct Parser {
@@ -63,17 +71,17 @@ pub struct Parser {
 impl Parser {
     pub fn new<F>(f: F) -> Self
     where
-        F: for<'a> Fn(&'a str, Cursor) -> ParseResult<'a> + Send + Sync + 'static,
+        F: for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Send + Sync + 'static,
     {
         Self { f: Arc::new(f) }
     }
 
-    pub fn run<'a>(&self, input: &'a str, cursor: Cursor) -> ParseResult<'a> {
-        (self.f)(input, cursor)
+    pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
+        (self.f)(input, cursor, context)
     }
 
     pub fn parse<'a>(&self, input: &'a str) -> ParseResult<'a> {
-        self.run(input, Cursor::default())
+        self.run(input, Cursor::default(), Context::new())
     }
 }
 
@@ -131,48 +139,52 @@ pub enum RepeatWhileControl {
 }
 
 pub fn empty() -> Parser {
-    Parser::new(|input, cursor| {
+    Parser::new(|input, cursor, context| {
         Ok(ParseSuccess {
             tokens: Vec::new(),
             rest: input,
             cursor,
+            context,
         })
     })
 }
 
 pub fn concat(left: Parser, right: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let mut left_ok = left.run(input, cursor)?;
-        let right_ok = right.run(left_ok.rest, left_ok.cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let mut left_ok = left.run(input, cursor, context)?;
+        let right_ok = right.run(left_ok.rest, left_ok.cursor, left_ok.context)?;
         left_ok.tokens.extend(right_ok.tokens);
 
         Ok(ParseSuccess {
             tokens: left_ok.tokens,
             rest: right_ok.rest,
             cursor: right_ok.cursor,
+            context: right_ok.context,
         })
     })
 }
 
 pub fn ignore(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: Vec::new(),
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
 
 pub fn string(lit: &'static str) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         if let Some(rest) = input.strip_prefix(lit) {
             let cursor = advance(cursor, lit);
             Ok(ParseSuccess {
                 tokens: vec![Value::Str(lit.to_string())],
                 rest,
                 cursor,
+                context,
             })
         } else {
             Err(ParseFailure {
@@ -185,7 +197,7 @@ pub fn string(lit: &'static str) -> Parser {
 }
 
 pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let Some(&b) = input.as_bytes().first() else {
             return Err(ParseFailure {
                 reason: "expected ASCII character".to_string(),
@@ -217,12 +229,13 @@ pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
             tokens: vec![Value::Int(BigInt::from(b))],
             rest,
             cursor,
+            context,
         })
     })
 }
 
 pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let Some(ch) = input.chars().next() else {
             return Err(ParseFailure {
                 reason: "expected utf8 codepoint".to_string(),
@@ -246,12 +259,13 @@ pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
             tokens: vec![Value::Int(BigInt::from(ch as u32))],
             rest,
             cursor,
+            context,
         })
     })
 }
 
 pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut consumed_end = 0;
         let mut taken = 0usize;
 
@@ -286,12 +300,13 @@ pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize
             tokens: vec![Value::Str(consumed.to_string())],
             rest,
             cursor,
+            context,
         })
     })
 }
 
 pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let bytes = input.as_bytes();
         let mut taken = 0usize;
         let mut i = 0usize;
@@ -327,6 +342,7 @@ pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usi
             tokens: vec![Value::Str(consumed.to_string())],
             rest,
             cursor,
+            context,
         })
     })
 }
@@ -336,7 +352,7 @@ pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usi
 /// `count` must fall on a UTF-8 character boundary of the input, since results
 /// are returned as `&str`; otherwise the parser fails.
 pub fn bytes(count: usize) -> Parser {
-    Parser::new(move |input, cursor| match input.get(..count) {
+    Parser::new(move |input, cursor, context| match input.get(..count) {
         Some(consumed) => {
             let rest = &input[count..];
             let cursor = advance(cursor, consumed);
@@ -344,6 +360,7 @@ pub fn bytes(count: usize) -> Parser {
                 tokens: vec![Value::Str(consumed.to_string())],
                 rest,
                 cursor,
+                context,
             })
         }
         None => Err(ParseFailure {
@@ -356,12 +373,13 @@ pub fn bytes(count: usize) -> Parser {
 
 /// Succeeds only at the end of the input, emitting no tokens.
 pub fn eos() -> Parser {
-    Parser::new(|input, cursor| {
+    Parser::new(|input, cursor, context| {
         if input.is_empty() {
             Ok(ParseSuccess {
                 tokens: Vec::new(),
                 rest: input,
                 cursor,
+                context,
             })
         } else {
             Err(ParseFailure {
@@ -382,7 +400,7 @@ pub fn integer_min(min: usize) -> Parser {
 }
 
 pub fn integer_range(min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let bytes = input.as_bytes();
         let mut i = 0usize;
 
@@ -421,30 +439,34 @@ pub fn integer_range(min: usize, max: Option<usize>) -> Parser {
             tokens: vec![Value::Int(value)],
             rest,
             cursor,
+            context,
         })
     })
 }
 
 pub fn optional(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| match parser.run(input, cursor) {
-        Ok(ok) => Ok(ok),
-        Err(_) => Ok(ParseSuccess {
-            tokens: Vec::new(),
-            rest: input,
-            cursor,
-        }),
-    })
+    Parser::new(
+        move |input, cursor, context| match parser.run(input, cursor, context.clone()) {
+            Ok(ok) => Ok(ok),
+            Err(_) => Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            }),
+        },
+    )
 }
 
 /// Tries each parser in order, returning the first success. If all fail, the
 /// branch failure messages are aggregated (joined with " or "), like
 /// NimbleParsec, rather than surfacing only the first.
 pub fn choice(parsers: Vec<Parser>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut reasons = Vec::with_capacity(parsers.len());
 
         for parser in &parsers {
-            match parser.run(input, cursor) {
+            match parser.run(input, cursor, context.clone()) {
                 Ok(ok) => return Ok(ok),
                 Err(err) => reasons.push(err.reason),
             }
@@ -471,9 +493,10 @@ pub fn choice(parsers: Vec<Parser>) -> Parser {
 /// still enforced afterwards. This favors making progress over failing the
 /// whole parse, while still guaranteeing termination.
 pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut rest = input;
         let mut cur = cursor;
+        let mut ctx = context;
         let mut tokens = Vec::new();
         let mut count = 0usize;
 
@@ -484,7 +507,7 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
                 }
             }
 
-            match parser.run(rest, cur) {
+            match parser.run(rest, cur, ctx.clone()) {
                 Ok(ok) => {
                     if ok.rest.len() == rest.len() {
                         // No input consumed: stop instead of spinning forever.
@@ -493,6 +516,7 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
                     tokens.extend(ok.tokens);
                     rest = ok.rest;
                     cur = ok.cursor;
+                    ctx = ok.context;
                     count += 1;
                 }
                 Err(err) => {
@@ -516,6 +540,7 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
             tokens,
             rest,
             cursor: cur,
+            context: ctx,
         })
     })
 }
@@ -523,7 +548,7 @@ pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
 pub fn times(parser: Parser, options: TimesOptions) -> Parser {
     if let Some(max) = options.max {
         if max < options.min {
-            return Parser::new(move |input, cursor| {
+            return Parser::new(move |input, cursor, _context| {
                 Err(ParseFailure {
                     reason: "invalid times options: max must be >= min".to_string(),
                     rest: input,
@@ -539,22 +564,25 @@ pub fn times(parser: Parser, options: TimesOptions) -> Parser {
 /// Parses `parser` exactly `n` times in sequence, concatenating the results,
 /// like NimbleParsec's `duplicate`. With `n == 0` it matches nothing.
 pub fn duplicate(parser: Parser, n: usize) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut rest = input;
         let mut cur = cursor;
+        let mut ctx = context;
         let mut tokens = Vec::new();
 
         for _ in 0..n {
-            let ok = parser.run(rest, cur)?;
+            let ok = parser.run(rest, cur, ctx)?;
             tokens.extend(ok.tokens);
             rest = ok.rest;
             cur = ok.cursor;
+            ctx = ok.context;
         }
 
         Ok(ParseSuccess {
             tokens,
             rest,
             cursor: cur,
+            context: ctx,
         })
     })
 }
@@ -563,12 +591,12 @@ pub fn duplicate(parser: Parser, n: usize) -> Parser {
 /// that match; the skipped prefix is discarded. Mirrors NimbleParsec's
 /// `eventually`. Fails if the inner parser never matches before end of input.
 pub fn eventually(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut rest = input;
         let mut cur = cursor;
 
         loop {
-            if let Ok(ok) = parser.run(rest, cur) {
+            if let Ok(ok) = parser.run(rest, cur, context.clone()) {
                 return Ok(ok);
             }
 
@@ -591,28 +619,34 @@ pub fn eventually(parser: Parser) -> Parser {
 }
 
 pub fn lookahead(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        parser.run(input, cursor).map(|_| ParseSuccess {
-            tokens: Vec::new(),
-            rest: input,
-            cursor,
-        })
+    Parser::new(move |input, cursor, context| {
+        parser
+            .run(input, cursor, context.clone())
+            .map(|_| ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            })
     })
 }
 
 pub fn lookahead_not(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| match parser.run(input, cursor) {
-        Ok(_) => Err(ParseFailure {
-            reason: "did not expect lookahead parser to match".to_string(),
-            rest: input,
-            cursor,
-        }),
-        Err(_) => Ok(ParseSuccess {
-            tokens: Vec::new(),
-            rest: input,
-            cursor,
-        }),
-    })
+    Parser::new(
+        move |input, cursor, context| match parser.run(input, cursor, context.clone()) {
+            Ok(_) => Err(ParseFailure {
+                reason: "did not expect lookahead parser to match".to_string(),
+                rest: input,
+                cursor,
+            }),
+            Err(_) => Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            }),
+        },
+    )
 }
 
 /// Applies `parser` while `while_fn` returns [`RepeatWhileControl::Cont`],
@@ -625,9 +659,10 @@ pub fn repeat_while<F>(parser: Parser, while_fn: F, min: usize, max: Option<usiz
 where
     F: Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         let mut rest = input;
         let mut cur = cursor;
+        let mut ctx = context;
         let mut tokens = Vec::new();
         let mut count = 0usize;
 
@@ -643,7 +678,7 @@ where
                 RepeatWhileControl::Cont => {}
             }
 
-            match parser.run(rest, cur) {
+            match parser.run(rest, cur, ctx.clone()) {
                 Ok(ok) => {
                     if ok.rest.len() == rest.len() {
                         // No input consumed: stop instead of spinning forever.
@@ -652,6 +687,7 @@ where
                     tokens.extend(ok.tokens);
                     rest = ok.rest;
                     cur = ok.cursor;
+                    ctx = ok.context;
                     count += 1;
                 }
                 Err(_) => break,
@@ -670,6 +706,7 @@ where
             tokens,
             rest,
             cursor: cur,
+            context: ctx,
         })
     })
 }
@@ -679,12 +716,13 @@ pub fn map<F>(parser: Parser, f: F) -> Parser
 where
     F: Fn(Value) -> Value + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: ok.tokens.into_iter().map(&f).collect(),
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -695,23 +733,83 @@ pub fn reduce<F>(parser: Parser, f: F) -> Parser
 where
     F: Fn(Vec<Value>) -> Value + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: vec![f(ok.tokens)],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
 
+/// Low-level transform: runs `parser`, then calls `f` with the results, the
+/// threaded context, and the position *after* the combinator, mirroring
+/// NimbleParsec's `post_traverse`. `f` returns the new results and context, or
+/// an error message that fails the parse. `map`, `reduce`, `wrap`, `replace`,
+/// `tag`, `line`, and `byte_offset` are higher-level forms of this.
+pub fn post_traverse<F>(parser: Parser, f: F) -> Parser
+where
+    F: Fn(Vec<Value>, Context, Cursor) -> Result<(Vec<Value>, Context), String>
+        + Send
+        + Sync
+        + 'static,
+{
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
+        match f(ok.tokens, ok.context, ok.cursor) {
+            Ok((tokens, context)) => Ok(ParseSuccess {
+                tokens,
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context,
+            }),
+            Err(reason) => Err(ParseFailure {
+                reason,
+                rest: ok.rest,
+                cursor: ok.cursor,
+            }),
+        }
+    })
+}
+
+/// Like [`post_traverse`], but `f` receives the position *before* the
+/// combinator runs, mirroring NimbleParsec's `pre_traverse`.
+pub fn pre_traverse<F>(parser: Parser, f: F) -> Parser
+where
+    F: Fn(Vec<Value>, Context, Cursor) -> Result<(Vec<Value>, Context), String>
+        + Send
+        + Sync
+        + 'static,
+{
+    Parser::new(move |input, cursor, context| {
+        let before = cursor;
+        let ok = parser.run(input, cursor, context)?;
+        match f(ok.tokens, ok.context, before) {
+            Ok((tokens, context)) => Ok(ParseSuccess {
+                tokens,
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context,
+            }),
+            Err(reason) => Err(ParseFailure {
+                reason,
+                rest: ok.rest,
+                cursor: ok.cursor,
+            }),
+        }
+    })
+}
+
 pub fn tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: vec![Value::Tagged(name.to_string(), ok.tokens)],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -719,8 +817,8 @@ pub fn tag(name: &'static str, parser: Parser) -> Parser {
 /// Tags a single result token, like NimbleParsec's `unwrap_and_tag`. Fails if
 /// the combinator does not emit exactly one token.
 pub fn unwrap_and_tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         let mut tokens = ok.tokens;
         if tokens.len() != 1 {
             return Err(ParseFailure {
@@ -734,18 +832,20 @@ pub fn unwrap_and_tag(name: &'static str, parser: Parser) -> Parser {
             tokens: vec![Value::KeyValue(name.to_string(), Box::new(value))],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
 
 /// Wraps all result tokens into a single list value, like NimbleParsec's `wrap`.
 pub fn wrap(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: vec![Value::List(ok.tokens)],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -753,12 +853,13 @@ pub fn wrap(parser: Parser) -> Parser {
 /// Replaces all result tokens with a single constant `value`, like
 /// NimbleParsec's `replace`.
 pub fn replace(parser: Parser, value: Value) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         Ok(ParseSuccess {
             tokens: vec![value.clone()],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -767,12 +868,14 @@ pub fn replace(parser: Parser, value: Value) -> Parser {
 /// NimbleParsec's `label`. The failure position is preserved; success passes
 /// through unchanged.
 pub fn label(parser: Parser, label: &'static str) -> Parser {
-    Parser::new(move |input, cursor| {
-        parser.run(input, cursor).map_err(|err| ParseFailure {
-            reason: format!("expected {label}"),
-            rest: err.rest,
-            cursor: err.cursor,
-        })
+    Parser::new(move |input, cursor, context| {
+        parser
+            .run(input, cursor, context)
+            .map_err(|err| ParseFailure {
+                reason: format!("expected {label}"),
+                rest: err.rest,
+                cursor: err.cursor,
+            })
     })
 }
 
@@ -780,8 +883,8 @@ pub fn label(parser: Parser, label: &'static str) -> Parser {
 /// `byte_offset`. Emits a single pair `List([List(results), Int(offset)])`,
 /// where `offset` is the byte offset after the wrapped combinator.
 pub fn byte_offset(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         let token = Value::List(vec![
             Value::List(ok.tokens),
             Value::Int(BigInt::from(ok.cursor.byte_offset)),
@@ -790,6 +893,7 @@ pub fn byte_offset(parser: Parser) -> Parser {
             tokens: vec![token],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -798,8 +902,8 @@ pub fn byte_offset(parser: Parser) -> Parser {
 /// `line`. Emits a single pair `List([List(results), List([line, line_offset])])`,
 /// where `line_offset` is the byte offset immediately after the last newline.
 pub fn line(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
-        let ok = parser.run(input, cursor)?;
+    Parser::new(move |input, cursor, context| {
+        let ok = parser.run(input, cursor, context)?;
         let position = Value::List(vec![
             Value::Int(BigInt::from(ok.cursor.line)),
             Value::Int(BigInt::from(ok.cursor.line_start_offset)),
@@ -809,6 +913,7 @@ pub fn line(parser: Parser) -> Parser {
             tokens: vec![token],
             rest: ok.rest,
             cursor: ok.cursor,
+            context: ok.context,
         })
     })
 }
@@ -817,9 +922,9 @@ pub fn line(parser: Parser) -> Parser {
 /// result after) and passes the result through unchanged, like NimbleParsec's
 /// `debug`.
 pub fn debug(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor| {
+    Parser::new(move |input, cursor, context| {
         eprintln!("debug: parsing {input:?} at {cursor:?}");
-        let result = parser.run(input, cursor);
+        let result = parser.run(input, cursor, context);
         match &result {
             Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
             Err(err) => eprintln!("debug: error {:?}", err.reason),
