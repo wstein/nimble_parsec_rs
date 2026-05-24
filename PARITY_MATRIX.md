@@ -122,5 +122,14 @@ throwaway tokens (the interpreter threads an `emit` flag so leaves under
 `ignore` skip building tokens), and `Value::Int` now uses the small-integer
 [`Integer`] representation, so in-range integers no longer heap-allocate a
 `BigInt` — this alone took the interpreter from ~1.16 to ~0.81 µs and the
-specialized path from ~0.56 to ~0.14 µs. The remaining interpreter overhead is
-the per-combinator result `Vec`s and context clones, not integer allocation.
+specialized path from ~0.56 to ~0.14 µs.
+
+The remaining interpreter cost is dominated by AST dispatch and recursion (an
+`Arc`-walked tree), not allocation: context clones of an empty map are free, and
+only the integer leaves allocate result `Vec`s (~12% of the time on this
+grammar). **Deferred:** threading a shared token accumulator (`&mut Vec<Value>`)
+through the interpreter would remove those per-leaf `Vec`s, but it's a modest
+interpreter-only win (the codegen path already avoids them) for a sizeable
+rewrite with backtracking-truncation risk — postponed. The higher-leverage
+direction is broadening the codegen subset so more grammars take the ~0.14 µs
+specialized path.
