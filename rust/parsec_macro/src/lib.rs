@@ -35,7 +35,7 @@ pub fn compile_parser(input: TokenStream) -> TokenStream {
     let expr = parse_macro_input!(input as Expr);
     match codegen_impl(&expr, false) {
         Some(body) => quote! {
-            ::nimble_parsec_rs::native(|__input: &str, __cursor: ::nimble_parsec_rs::Cursor, __context: ::nimble_parsec_rs::Context| {
+            ::nimble_parsec_rs::__private::native(|__input: &str, __cursor: ::nimble_parsec_rs::Cursor, __context: ::nimble_parsec_rs::Context| {
                 let mut __input = __input;
                 let mut __cursor = __cursor;
                 let mut __context = __context;
@@ -175,7 +175,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                             cursor: __cursor,
                         });
                     }
-                    __cursor = ::nimble_parsec_rs::__advance(__cursor, __lit);
+                    __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __lit);
                     __input = &__input[__lit.len()..];
                 }})
             } else {
@@ -184,7 +184,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     match __input.strip_prefix(__lit) {
                         Some(__rest) => {
                             __tokens.push(::nimble_parsec_rs::Value::Str(__lit.to_string()));
-                            __cursor = ::nimble_parsec_rs::__advance(__cursor, __lit);
+                            __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __lit);
                             __input = __rest;
                         }
                         None => {
@@ -217,7 +217,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                             cursor: __cursor,
                         });
                     }
-                    __cursor = ::nimble_parsec_rs::__advance(__cursor, &__input[..__n]);
+                    __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, &__input[..__n]);
                     __input = &__input[__n..];
                 }})
             } else {
@@ -239,7 +239,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     __tokens.push(::nimble_parsec_rs::Value::Int(
                         __consumed.parse::<::nimble_parsec_rs::BigInt>().expect("digit run is valid"),
                     ));
-                    __cursor = ::nimble_parsec_rs::__advance(__cursor, __consumed);
+                    __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
                     __input = &__input[__n..];
                 }})
             }
@@ -261,7 +261,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                             cursor: __cursor,
                         });
                     }
-                    __cursor = ::nimble_parsec_rs::__advance(__cursor, &__input[..__i]);
+                    __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, &__input[..__i]);
                     __input = &__input[__i..];
                 }})
             } else {
@@ -281,7 +281,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     __tokens.push(::nimble_parsec_rs::Value::Int(
                         __consumed.parse::<::nimble_parsec_rs::BigInt>().expect("digit run is valid"),
                     ));
-                    __cursor = ::nimble_parsec_rs::__advance(__cursor, __consumed);
+                    __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
                     __input = &__input[__i..];
                 }})
             }
