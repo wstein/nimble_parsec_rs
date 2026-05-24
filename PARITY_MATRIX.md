@@ -59,8 +59,8 @@ Status legend:
 
 | Elixir | Rust | Status | Notes |
 | --- | --- | --- | --- |
-| `byte_offset` | — | ⚠️ | Data is on `Cursor.byte_offset`, but no combinator emits it as a token. |
-| `line` | — | ⚠️ | `Cursor.line` / `line_start_offset` are tracked, but no `line` combinator. |
+| `byte_offset` | `byte_offset` | ✅ | Wraps results with the trailing byte offset. |
+| `line` | `line` | ✅ | Wraps results with the trailing `{line, line_offset}`. |
 
 ## Traversal, references, generators, codegen
 

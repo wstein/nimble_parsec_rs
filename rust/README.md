@@ -25,6 +25,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `map` (per element), `reduce` (all results into one)
   - `tag`, `unwrap_and_tag`, `wrap`, `replace`
   - `label` (custom failure messages)
+  - `line`, `byte_offset` (position metadata)
 
   ## Benchmark scaffold
 

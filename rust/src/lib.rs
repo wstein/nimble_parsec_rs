@@ -768,6 +768,43 @@ pub fn label(parser: Parser, label: &'static str) -> Parser {
     })
 }
 
+/// Wraps `parser`'s results with the trailing byte offset, like NimbleParsec's
+/// `byte_offset`. Emits a single pair `List([List(results), Int(offset)])`,
+/// where `offset` is the byte offset after the wrapped combinator.
+pub fn byte_offset(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        let token = Value::List(vec![
+            Value::List(ok.tokens),
+            Value::Int(BigInt::from(ok.cursor.byte_offset)),
+        ]);
+        Ok(ParseSuccess {
+            tokens: vec![token],
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
+/// Wraps `parser`'s results with the trailing line position, like NimbleParsec's
+/// `line`. Emits a single pair `List([List(results), List([line, line_offset])])`,
+/// where `line_offset` is the byte offset immediately after the last newline.
+pub fn line(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        let position = Value::List(vec![
+            Value::Int(BigInt::from(ok.cursor.line)),
+            Value::Int(BigInt::from(ok.cursor.line_start_offset)),
+        ]);
+        let token = Value::List(vec![Value::List(ok.tokens), position]);
+        Ok(ParseSuccess {
+            tokens: vec![token],
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
 /// Shared positive/negative membership rule for character predicates.
 ///
 /// Each item is `(is_negative, contains)`. A value is accepted when it hits at
