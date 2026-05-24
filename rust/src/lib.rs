@@ -805,6 +805,21 @@ pub fn line(parser: Parser) -> Parser {
     })
 }
 
+/// Prints the parser state around `parser` to stderr (the input before, and the
+/// result after) and passes the result through unchanged, like NimbleParsec's
+/// `debug`.
+pub fn debug(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        eprintln!("debug: parsing {input:?} at {cursor:?}");
+        let result = parser.run(input, cursor);
+        match &result {
+            Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
+            Err(err) => eprintln!("debug: error {:?}", err.reason),
+        }
+        result
+    })
+}
+
 /// Shared positive/negative membership rule for character predicates.
 ///
 /// Each item is `(is_negative, contains)`. A value is accepted when it hits at

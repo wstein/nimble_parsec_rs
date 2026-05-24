@@ -53,7 +53,7 @@ Status legend:
 | `wrap` | `wrap` | ✅ | Wraps results in a single list value (`Value::List`). |
 | `replace` | `replace` | ✅ | Replaces results with a constant value. |
 | `label` | `label` | ✅ | Overrides the failure message with `expected <label>`. |
-| `debug` | — | ❌ | Print parser state for debugging. |
+| `debug` | `debug` | ✅ | Prints parser state to stderr; passes results through. |
 
 ## Position metadata
 
@@ -75,11 +75,9 @@ Status legend:
 
 ## Summary
 
-The core runtime parsers and control flow are ported. The open items cluster
-into transform/tagging combinators (`reduce`, `wrap`, `replace`,
-`unwrap_and_tag`, `label`, `debug`), a few primitives (`ascii_string`,
-`bytes`, `eos`, `duplicate`, `eventually`), the position combinators (`line`,
-`byte_offset`), and four larger design efforts:
+The full runtime combinator surface is ported: primitives, control flow,
+transforms/tagging, error labeling, and position metadata. The remaining ❌
+rows are not drop-in combinators but four larger design efforts:
 
 1. **Context-threaded traversal** (`post_traverse`/`pre_traverse` and their
    `quoted_*` variants) — needs a parser context carried through the chain.
@@ -88,3 +86,6 @@ into transform/tagging combinators (`reduce`, `wrap`, `replace`,
 3. **Generators** (`generate`) — random input synthesis from a parser.
 4. **Compile-time code generation** (`defparsec` family) — the proc-macro
    specialization that gives NimbleParsec its performance.
+
+One ⚠️ remains within ported combinators: `choice` returns the first branch's
+error rather than aggregating labels across branches.

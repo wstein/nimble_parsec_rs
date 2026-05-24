@@ -1,9 +1,10 @@
-# nimble_parsec_rs (Phase 1)
+# nimble_parsec_rs
 
-This crate is an incremental Rust port of selected NimbleParsec behavior.
-It intentionally starts with runtime combinators and parity tests before attempting macro/codegen parity.
+This crate is an incremental Rust port of NimbleParsec. It implements the
+runtime combinator surface with parity tests before attempting macro/codegen
+parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
 
-## Implemented in Phase 1
+## Implemented
 
 - Core parser runtime with line/byte cursor tracking
 - Proc-macro scaffold (`compile_parser!`) for compile-time parser expressions
@@ -26,6 +27,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `tag`, `unwrap_and_tag`, `wrap`, `replace`
   - `label` (custom failure messages)
   - `line`, `byte_offset` (position metadata)
+  - `debug` (prints parser state to stderr)
 
   ## Benchmark scaffold
 
