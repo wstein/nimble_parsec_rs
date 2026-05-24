@@ -26,11 +26,12 @@ impl syn::parse::Parse for NamedParser {
 // compile_parser!
 // ---------------------------------------------------------------------------
 
-/// Validates a parser-building expression at compile time.  When the
-/// expression uses only statically-recognizable combinators (`string`,
-/// `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `empty`, `eos`),
-/// emits specialized Rust that avoids intermediate token allocations.
-/// Otherwise falls back to the unchanged runtime expression.
+/// Validates a parser-building expression at compile time. When the expression
+/// uses only statically-recognizable combinators — the primitives,
+/// `concat`/`ignore`/`choice`/`optional`/`repeat`, and the
+/// transform/tagging/position combinators — it emits specialized Rust that
+/// skips the `Ast` interpreter. Otherwise it falls back to the unchanged
+/// runtime expression.
 #[proc_macro]
 pub fn compile_parser(input: TokenStream) -> TokenStream {
     let expr = parse_macro_input!(input as Expr);
@@ -610,6 +611,102 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let __start = __tokens.len();
                 #inner
                 #emit
+            }})
+        }
+
+        // -- optional -----------------------------------------------------
+        // Runs the inner in a closure so its `return Err` is caught here and
+        // turned into "succeed, consuming nothing", matching the interpreter.
+        "optional" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                let __opt_input = __input;
+                let __opt_cursor = __cursor;
+                let __opt_ctx = __context.clone();
+                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                    let mut __input = __opt_input;
+                    let mut __cursor = __opt_cursor;
+                    let mut __context = __opt_ctx.clone();
+                    let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        ::std::vec::Vec::new();
+                    #inner
+                    Ok(::nimble_parsec_rs::ParseSuccess {
+                        tokens: __tokens,
+                        rest: __input,
+                        cursor: __cursor,
+                        context: __context,
+                    })
+                })();
+                if let Ok(__ok) = __r {
+                    __tokens.extend(__ok.tokens);
+                    __input = __ok.rest;
+                    __cursor = __ok.cursor;
+                    __context = __ok.context;
+                }
+            }})
+        }
+
+        // -- repeat -------------------------------------------------------
+        // Each iteration runs the inner in a closure (to catch failure); a
+        // non-consuming success stops the loop, and `min` is enforced after,
+        // matching the interpreter (the inner error propagates below `min`).
+        "repeat" if args.len() == 3 => {
+            let min = &args[1];
+            let max = &args[2];
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                let __min: usize = #min;
+                let __max_opt: ::std::option::Option<usize> = #max;
+                let mut __count: usize = 0;
+                loop {
+                    if let ::std::option::Option::Some(__max) = __max_opt {
+                        if __count >= __max {
+                            break;
+                        }
+                    }
+                    let __it_input = __input;
+                    let __it_cursor = __cursor;
+                    let __it_ctx = __context.clone();
+                    let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                        let mut __input = __it_input;
+                        let mut __cursor = __it_cursor;
+                        let mut __context = __it_ctx.clone();
+                        let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                            ::std::vec::Vec::new();
+                        #inner
+                        Ok(::nimble_parsec_rs::ParseSuccess {
+                            tokens: __tokens,
+                            rest: __input,
+                            cursor: __cursor,
+                            context: __context,
+                        })
+                    })();
+                    match __r {
+                        Ok(__ok) => {
+                            if __ok.rest.len() == __input.len() {
+                                break;
+                            }
+                            __tokens.extend(__ok.tokens);
+                            __input = __ok.rest;
+                            __cursor = __ok.cursor;
+                            __context = __ok.context;
+                            __count += 1;
+                        }
+                        Err(__e) => {
+                            if __count < __min {
+                                return Err(__e);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if __count < __min {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "repeat did not reach minimum repetitions".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
             }})
         }
 

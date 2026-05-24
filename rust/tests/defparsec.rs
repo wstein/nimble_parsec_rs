@@ -332,3 +332,48 @@ fn compile_parser_byte_offset_and_line_match_runtime() {
     let ln = compile_parser!(line(integer_min(1)));
     assert_parity(&ln, &line(integer_min(1)), &["42", "x"]);
 }
+
+// ---------------------------------------------------------------------------
+// optional / repeat codegen parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_optional_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, optional};
+
+    let p = compile_parser!(concat(optional(string("-")), integer_min(1)));
+    let rt = concat(optional(string("-")), integer_min(1));
+    assert_parity(&p, &rt, &["-5", "5", "x", ""]);
+}
+
+#[test]
+fn compile_parser_repeat_matches_runtime() {
+    use nimble_parsec_rs::{ascii_char, compile_parser, repeat, AsciiPredicate};
+
+    let bounded = compile_parser!(repeat(
+        ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]),
+        1,
+        Some(3)
+    ));
+    let bounded_rt = repeat(
+        ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]),
+        1,
+        Some(3),
+    );
+    assert_parity(&bounded, &bounded_rt, &["abcd", "a", "", "1"]);
+
+    let unbounded = compile_parser!(repeat(string("ab"), 0, None));
+    assert_parity(
+        &unbounded,
+        &repeat(string("ab"), 0, None),
+        &["ababx", "x", ""],
+    );
+
+    // Below `min`: the inner failure must propagate identically.
+    let min_two = compile_parser!(repeat(string("ab"), 2, None));
+    assert_parity(
+        &min_two,
+        &repeat(string("ab"), 2, None),
+        &["abab", "ab", "x"],
+    );
+}
