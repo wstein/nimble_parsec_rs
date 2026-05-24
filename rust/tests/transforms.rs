@@ -1,11 +1,41 @@
 use nimble_parsec_rs::{
-    ascii_char, concat, ignore, integer_min, map, reduce, replace, string, unwrap_and_tag, wrap,
-    AsciiPredicate, Value,
+    ascii_char, concat, ignore, integer_min, map, post_traverse, reduce, replace, string,
+    unwrap_and_tag, wrap, AsciiPredicate, Value,
 };
 use num_bigint::BigInt;
 
 fn int(n: i64) -> Value {
     Value::Int(BigInt::from(n))
+}
+
+// `ignore` suppresses inner token allocation, but token-dependent observable
+// effects must still run. These pin that contract.
+
+#[test]
+fn ignore_preserves_post_traverse_context() {
+    let first = ignore(post_traverse(integer_min(1), |tokens, mut ctx, _| {
+        ctx.insert("seen".to_string(), Value::Str("yes".to_string()));
+        Ok((tokens, ctx))
+    }));
+    let parser = concat(first, concat(ignore(string("-")), integer_min(1)));
+
+    let ok = parser.parse("12-34").expect("parses");
+    assert_eq!(ok.context.get("seen"), Some(&Value::Str("yes".to_string())));
+    assert_eq!(ok.tokens, vec![int(34)]);
+}
+
+#[test]
+fn ignore_propagates_post_traverse_error() {
+    let parser = ignore(post_traverse(integer_min(1), |_, _, _| {
+        Err("boom".to_string())
+    }));
+    assert_eq!(parser.parse("12").expect_err("should fail").reason, "boom");
+}
+
+#[test]
+fn ignore_still_validates_unwrap_and_tag() {
+    let pair = concat(integer_min(1), concat(ignore(string(",")), integer_min(1)));
+    assert!(ignore(unwrap_and_tag("pair", pair)).parse("3,4").is_err());
 }
 
 #[test]

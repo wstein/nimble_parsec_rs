@@ -250,7 +250,7 @@ impl Parser {
     /// Runs the parser from an explicit `cursor` and `context`, threading both
     /// through the parse. Most callers want [`Parser::parse`].
     pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
-        run_ast(&self.ast, input, cursor, context)
+        run_ast(&self.ast, input, cursor, context, true)
     }
 
     /// Parses `input` from the start (default cursor, empty context).
@@ -788,11 +788,17 @@ pub fn __advance(cursor: Cursor, consumed: &str) -> Cursor {
     advance(cursor, consumed)
 }
 
+/// Interprets `ast`. `emit` is `false` while inside an `ignore` (or zero-width
+/// assertion) subtree, where result tokens are discarded: leaf producers then
+/// skip building tokens. Transform nodes always run their inner with `emit =
+/// true`, so observable token-dependent effects (`unwrap_and_tag` validation,
+/// `post_traverse`/`pre_traverse` context and errors) are unchanged.
 fn run_ast<'a>(
     ast: &Arc<Ast>,
     input: &'a str,
     cursor: Cursor,
     context: Context,
+    emit: bool,
 ) -> ParseResult<'a> {
     match ast.as_ref() {
         Ast::Empty => Ok(ParseSuccess {
@@ -811,7 +817,11 @@ fn run_ast<'a>(
         Ast::Str { lit, reason } => {
             if let Some(rest) = input.strip_prefix(lit.as_ref()) {
                 Ok(ParseSuccess {
-                    tokens: vec![Value::Str(lit.to_string())],
+                    tokens: if emit {
+                        vec![Value::Str(lit.to_string())]
+                    } else {
+                        Vec::new()
+                    },
                     rest,
                     cursor: advance(cursor, lit),
                     context,
@@ -842,7 +852,11 @@ fn run_ast<'a>(
             }
             let consumed = &input[..1];
             Ok(ParseSuccess {
-                tokens: vec![Value::Int(BigInt::from(b))],
+                tokens: if emit {
+                    vec![Value::Int(BigInt::from(b))]
+                } else {
+                    Vec::new()
+                },
                 rest: &input[1..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -866,7 +880,11 @@ fn run_ast<'a>(
             }
             let consumed = &input[..ch.len_utf8()];
             Ok(ParseSuccess {
-                tokens: vec![Value::Int(BigInt::from(ch as u32))],
+                tokens: if emit {
+                    vec![Value::Int(BigInt::from(ch as u32))]
+                } else {
+                    Vec::new()
+                },
                 rest: &input[ch.len_utf8()..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -901,7 +919,11 @@ fn run_ast<'a>(
             }
             let consumed = &input[..consumed_end];
             Ok(ParseSuccess {
-                tokens: vec![Value::Str(consumed.to_string())],
+                tokens: if emit {
+                    vec![Value::Str(consumed.to_string())]
+                } else {
+                    Vec::new()
+                },
                 rest: &input[consumed_end..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -938,7 +960,11 @@ fn run_ast<'a>(
             }
             let consumed = &input[..i];
             Ok(ParseSuccess {
-                tokens: vec![Value::Str(consumed.to_string())],
+                tokens: if emit {
+                    vec![Value::Str(consumed.to_string())]
+                } else {
+                    Vec::new()
+                },
                 rest: &input[i..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -947,7 +973,11 @@ fn run_ast<'a>(
 
         Ast::Bytes(count) => match input.get(..*count) {
             Some(consumed) => Ok(ParseSuccess {
-                tokens: vec![Value::Str(consumed.to_string())],
+                tokens: if emit {
+                    vec![Value::Str(consumed.to_string())]
+                } else {
+                    Vec::new()
+                },
                 rest: &input[*count..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -999,11 +1029,16 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..i];
-            let value = consumed
-                .parse::<BigInt>()
-                .expect("digit run is a valid integer");
+            let tokens = if emit {
+                let value = consumed
+                    .parse::<BigInt>()
+                    .expect("digit run is a valid integer");
+                vec![Value::Int(value)]
+            } else {
+                Vec::new()
+            };
             Ok(ParseSuccess {
-                tokens: vec![Value::Int(value)],
+                tokens,
                 rest: &input[i..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1011,8 +1046,8 @@ fn run_ast<'a>(
         }
 
         Ast::Concat(left, right) => {
-            let mut left_ok = run_ast(left, input, cursor, context)?;
-            let right_ok = run_ast(right, left_ok.rest, left_ok.cursor, left_ok.context)?;
+            let mut left_ok = run_ast(left, input, cursor, context, emit)?;
+            let right_ok = run_ast(right, left_ok.rest, left_ok.cursor, left_ok.context, emit)?;
             left_ok.tokens.extend(right_ok.tokens);
             Ok(ParseSuccess {
                 tokens: left_ok.tokens,
@@ -1023,7 +1058,8 @@ fn run_ast<'a>(
         }
 
         Ast::Ignore(inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            // Inner tokens are discarded, so leaves below can skip building them.
+            let ok = run_ast(inner, input, cursor, context, false)?;
             Ok(ParseSuccess {
                 tokens: Vec::new(),
                 rest: ok.rest,
@@ -1032,7 +1068,7 @@ fn run_ast<'a>(
             })
         }
 
-        Ast::Optional(inner) => match run_ast(inner, input, cursor, context.clone()) {
+        Ast::Optional(inner) => match run_ast(inner, input, cursor, context.clone(), emit) {
             Ok(ok) => Ok(ok),
             Err(_) => Ok(ParseSuccess {
                 tokens: Vec::new(),
@@ -1045,7 +1081,7 @@ fn run_ast<'a>(
         Ast::Choice(choices) => {
             let mut reasons = Vec::with_capacity(choices.len());
             for choice in choices {
-                match run_ast(choice, input, cursor, context.clone()) {
+                match run_ast(choice, input, cursor, context.clone(), emit) {
                     Ok(ok) => return Ok(ok),
                     Err(err) => reasons.push(err.reason),
                 }
@@ -1072,6 +1108,7 @@ fn run_ast<'a>(
             "repeat did not reach minimum repetitions",
             |_, _, _| true,
             true,
+            emit,
         ),
 
         Ast::Duplicate { inner, n } => {
@@ -1080,7 +1117,7 @@ fn run_ast<'a>(
             let mut ctx = context;
             let mut tokens = Vec::new();
             for _ in 0..*n {
-                let ok = run_ast(inner, rest, cur, ctx)?;
+                let ok = run_ast(inner, rest, cur, ctx, emit)?;
                 tokens.extend(ok.tokens);
                 rest = ok.rest;
                 cur = ok.cursor;
@@ -1098,7 +1135,7 @@ fn run_ast<'a>(
             let mut rest = input;
             let mut cur = cursor;
             loop {
-                if let Ok(ok) = run_ast(inner, rest, cur, context.clone()) {
+                if let Ok(ok) = run_ast(inner, rest, cur, context.clone(), emit) {
                     return Ok(ok);
                 }
                 match rest.chars().next() {
@@ -1119,7 +1156,7 @@ fn run_ast<'a>(
         }
 
         Ast::Lookahead(inner) => {
-            run_ast(inner, input, cursor, context.clone()).map(|_| ParseSuccess {
+            run_ast(inner, input, cursor, context.clone(), false).map(|_| ParseSuccess {
                 tokens: Vec::new(),
                 rest: input,
                 cursor,
@@ -1127,7 +1164,7 @@ fn run_ast<'a>(
             })
         }
 
-        Ast::LookaheadNot(inner) => match run_ast(inner, input, cursor, context.clone()) {
+        Ast::LookaheadNot(inner) => match run_ast(inner, input, cursor, context.clone(), false) {
             Ok(_) => Err(ParseFailure {
                 reason: "did not expect lookahead parser to match".to_string(),
                 rest: input,
@@ -1156,10 +1193,11 @@ fn run_ast<'a>(
             "repeat_while did not reach minimum repetitions",
             |rest, cur, ctx| matches!(while_fn(rest, cur, ctx), RepeatWhileControl::Cont),
             false,
+            emit,
         ),
 
         Ast::Map(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             Ok(ParseSuccess {
                 tokens: ok.tokens.into_iter().map(|v| f(v)).collect(),
                 rest: ok.rest,
@@ -1169,7 +1207,7 @@ fn run_ast<'a>(
         }
 
         Ast::Reduce(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             Ok(ParseSuccess {
                 tokens: vec![f(ok.tokens)],
                 rest: ok.rest,
@@ -1179,7 +1217,7 @@ fn run_ast<'a>(
         }
 
         Ast::Tag(name, inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             Ok(ParseSuccess {
                 tokens: vec![Value::Tagged((*name).to_string(), ok.tokens)],
                 rest: ok.rest,
@@ -1189,7 +1227,7 @@ fn run_ast<'a>(
         }
 
         Ast::UnwrapAndTag(name, inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             let mut tokens = ok.tokens;
             if tokens.len() != 1 {
                 return Err(ParseFailure {
@@ -1208,7 +1246,7 @@ fn run_ast<'a>(
         }
 
         Ast::Wrap(inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             Ok(ParseSuccess {
                 tokens: vec![Value::List(ok.tokens)],
                 rest: ok.rest,
@@ -1218,7 +1256,7 @@ fn run_ast<'a>(
         }
 
         Ast::Replace(inner, value) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             Ok(ParseSuccess {
                 tokens: vec![value.clone()],
                 rest: ok.rest,
@@ -1228,7 +1266,7 @@ fn run_ast<'a>(
         }
 
         Ast::Label(inner, lbl) => {
-            run_ast(inner, input, cursor, context).map_err(|err| ParseFailure {
+            run_ast(inner, input, cursor, context, emit).map_err(|err| ParseFailure {
                 reason: format!("expected {lbl}"),
                 rest: err.rest,
                 cursor: err.cursor,
@@ -1236,7 +1274,7 @@ fn run_ast<'a>(
         }
 
         Ast::ByteOffset(inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             let token = Value::List(vec![
                 Value::List(ok.tokens),
                 Value::Int(BigInt::from(ok.cursor.byte_offset)),
@@ -1250,7 +1288,7 @@ fn run_ast<'a>(
         }
 
         Ast::Line(inner) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             let position = Value::List(vec![
                 Value::Int(BigInt::from(ok.cursor.line)),
                 Value::Int(BigInt::from(ok.cursor.line_start_offset)),
@@ -1266,7 +1304,7 @@ fn run_ast<'a>(
 
         Ast::Debug(inner) => {
             eprintln!("debug: parsing {input:?} at {cursor:?}");
-            let result = run_ast(inner, input, cursor, context);
+            let result = run_ast(inner, input, cursor, context, emit);
             match &result {
                 Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
                 Err(err) => eprintln!("debug: error {:?}", err.reason),
@@ -1275,7 +1313,7 @@ fn run_ast<'a>(
         }
 
         Ast::PostTraverse(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             match f(ok.tokens, ok.context, ok.cursor) {
                 Ok((tokens, context)) => Ok(ParseSuccess {
                     tokens,
@@ -1293,7 +1331,7 @@ fn run_ast<'a>(
 
         Ast::PreTraverse(inner, f) => {
             let before = cursor;
-            let ok = run_ast(inner, input, cursor, context)?;
+            let ok = run_ast(inner, input, cursor, context, true)?;
             match f(ok.tokens, ok.context, before) {
                 Ok((tokens, context)) => Ok(ParseSuccess {
                     tokens,
@@ -1313,7 +1351,7 @@ fn run_ast<'a>(
             let inner = cell
                 .get()
                 .expect("parsec reference used before it was defined");
-            run_ast(inner, input, cursor, context)
+            run_ast(inner, input, cursor, context, emit)
         }
 
         Ast::Native(f) => f(input, cursor, context),
@@ -1337,6 +1375,7 @@ fn run_repetition<'a>(
     too_few_reason: &'static str,
     mut should_continue: impl FnMut(&str, Cursor, &Context) -> bool,
     propagate_inner_error: bool,
+    emit: bool,
 ) -> ParseResult<'a> {
     let mut rest = input;
     let mut cur = cursor;
@@ -1353,7 +1392,7 @@ fn run_repetition<'a>(
         if !should_continue(rest, cur, &ctx) {
             break;
         }
-        match run_ast(inner, rest, cur, ctx.clone()) {
+        match run_ast(inner, rest, cur, ctx.clone(), emit) {
             Ok(ok) => {
                 if ok.rest.len() == rest.len() {
                     break;

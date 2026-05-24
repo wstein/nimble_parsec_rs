@@ -103,7 +103,7 @@ named parsers, which belong with codegen.
 
 | Variant | Time | Notes |
 | --- | --- | --- |
-| Interpreter (combinators) | ~1.38 µs | `Parser::parse` walking the `Ast` |
+| Interpreter (combinators) | ~1.16 µs | `Parser::parse` walking the `Ast` (after `ignore` token-suppression) |
 | **Specialized `compile_parser!`** | **~0.56 µs** | generated inline code (`Ast::Native`), emits identical tokens |
 | Hand-written, same tokens | ~0.43 µs | the *fair* codegen ceiling (still allocates the 6 `BigInt`s + `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
@@ -115,7 +115,8 @@ tokens**, so its ceiling is the third row, not the bottom — and the generated
 code already lands at ~0.56 µs, about **2.5× faster than the interpreter** and
 within ~30% of that fair ceiling. The remaining gap is dominated by the
 unavoidable token allocations (6 `BigInt`s + a `Vec`); `ignore`d
-sub-combinators no longer allocate throwaway tokens in the generated path. The
-complementary, lower-risk win for the *interpreter* path is to teach `ignore`
-to suppress inner-token allocation there too, plus a small-integer token
-representation.
+sub-combinators no longer allocate throwaway tokens in either the generated
+path or the interpreter — the interpreter threads an `emit` flag so leaves
+under `ignore` skip building tokens, worth ~16% on this grammar (1.38 → 1.16
+µs). A further win would be a small-integer token representation to avoid the
+`BigInt` heap allocations entirely.
