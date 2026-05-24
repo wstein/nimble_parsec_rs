@@ -528,6 +528,60 @@ pub fn times(parser: Parser, options: TimesOptions) -> Parser {
     repeat(parser, options.min, options.max)
 }
 
+/// Parses `parser` exactly `n` times in sequence, concatenating the results,
+/// like NimbleParsec's `duplicate`. With `n == 0` it matches nothing.
+pub fn duplicate(parser: Parser, n: usize) -> Parser {
+    Parser::new(move |input, cursor| {
+        let mut rest = input;
+        let mut cur = cursor;
+        let mut tokens = Vec::new();
+
+        for _ in 0..n {
+            let ok = parser.run(rest, cur)?;
+            tokens.extend(ok.tokens);
+            rest = ok.rest;
+            cur = ok.cursor;
+        }
+
+        Ok(ParseSuccess {
+            tokens,
+            rest,
+            cursor: cur,
+        })
+    })
+}
+
+/// Skips input one codepoint at a time until `parser` matches, then returns
+/// that match; the skipped prefix is discarded. Mirrors NimbleParsec's
+/// `eventually`. Fails if the inner parser never matches before end of input.
+pub fn eventually(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        let mut rest = input;
+        let mut cur = cursor;
+
+        loop {
+            if let Ok(ok) = parser.run(rest, cur) {
+                return Ok(ok);
+            }
+
+            match rest.chars().next() {
+                Some(ch) => {
+                    let consumed = &rest[..ch.len_utf8()];
+                    cur = advance(cur, consumed);
+                    rest = &rest[ch.len_utf8()..];
+                }
+                None => {
+                    return Err(ParseFailure {
+                        reason: "expected combinator to eventually match".to_string(),
+                        rest: input,
+                        cursor,
+                    });
+                }
+            }
+        }
+    })
+}
+
 pub fn lookahead(parser: Parser) -> Parser {
     Parser::new(move |input, cursor| {
         parser.run(input, cursor).map(|_| ParseSuccess {

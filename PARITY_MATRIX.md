@@ -36,8 +36,8 @@ Status legend:
 | `repeat` | `repeat` | ✅ | Non-consuming match stops the loop, then `min` is enforced. |
 | `repeat_while` | `repeat_while` | ✅ | Takes a native closure instead of an MFA. |
 | `times` | `times` | ✅ | |
-| `duplicate` | — | ❌ | Parse a combinator N times in sequence. |
-| `eventually` | — | ❌ | Skip input until the inner combinator matches. |
+| `duplicate` | `duplicate` | ✅ | Parses the combinator N times in sequence. |
+| `eventually` | `eventually` | ✅ | Skips input (per codepoint) until the inner combinator matches. |
 | `lookahead` | `lookahead` | ✅ | |
 | `lookahead_not` | `lookahead_not` | ✅ | |
 

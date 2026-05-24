@@ -19,7 +19,8 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `integer_exact`, `integer_min`, `integer_range` (arbitrary precision, matching NimbleParsec's unbounded BEAM integers)
   - `optional`
   - `choice`
-  - `repeat(min, max)`, `repeat_while`, `times`
+  - `repeat(min, max)`, `repeat_while`, `times`, `duplicate`
+  - `eventually`
   - `lookahead`, `lookahead_not`
   - `map` (per element), `reduce` (all results into one)
   - `tag`, `unwrap_and_tag`, `wrap`, `replace`
