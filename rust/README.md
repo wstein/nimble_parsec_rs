@@ -20,7 +20,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `repeat(min, max)`, `repeat_while`, `times`
   - `lookahead`, `lookahead_not`
   - `map` (per element), `reduce` (all results into one)
-  - `tag`
+  - `tag`, `unwrap_and_tag`, `wrap`, `replace`
 
   ## Benchmark scaffold
 

@@ -45,13 +45,13 @@ Status legend:
 
 | Elixir | Rust | Status | Notes |
 | --- | --- | --- | --- |
-| `tag` | `tag` | ✅ | Wraps results in a tagged list. |
-| `unwrap_and_tag` | — | ❌ | Tags a single result; errors if not exactly one. |
+| `tag` | `tag` | ✅ | Wraps results in a tagged list (`Value::Tagged`). |
+| `unwrap_and_tag` | `unwrap_and_tag` | ✅ | Tags a single result (`Value::KeyValue`); errors if not exactly one. |
 | `ignore` | `ignore` | ✅ | |
 | `map` | `map` | ✅ | Per-element transform (`Value → Value`). |
 | `reduce` | `reduce` | ✅ | Reduces all results into a single value (`Vec<Value> → Value`). |
-| `wrap` | — | ❌ | Wrap results in a single list value. |
-| `replace` | — | ❌ | Replace results with a constant value. |
+| `wrap` | `wrap` | ✅ | Wraps results in a single list value (`Value::List`). |
+| `replace` | `replace` | ✅ | Replaces results with a constant value. |
 | `label` | — | ❌ | Override the failure message. |
 | `debug` | — | ❌ | Print parser state for debugging. |
 

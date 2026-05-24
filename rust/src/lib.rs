@@ -29,7 +29,12 @@ pub enum Value {
     /// combinators (the latter emits the matched byte as its codepoint).
     Int(BigInt),
     Str(String),
+    /// A list of values wrapping a combinator's results, produced by `wrap`.
+    List(Vec<Value>),
+    /// A tagged list of values, produced by `tag`.
     Tagged(String, Vec<Value>),
+    /// A tagged single value, produced by `unwrap_and_tag`.
+    KeyValue(String, Box<Value>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -560,6 +565,53 @@ pub fn tag(name: &'static str, parser: Parser) -> Parser {
         let ok = parser.run(input, cursor)?;
         Ok(ParseSuccess {
             tokens: vec![Value::Tagged(name.to_string(), ok.tokens)],
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
+/// Tags a single result token, like NimbleParsec's `unwrap_and_tag`. Fails if
+/// the combinator does not emit exactly one token.
+pub fn unwrap_and_tag(name: &'static str, parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        let mut tokens = ok.tokens;
+        if tokens.len() != 1 {
+            return Err(ParseFailure {
+                reason: format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
+                rest: input,
+                cursor,
+            });
+        }
+        let value = tokens.pop().expect("length checked above");
+        Ok(ParseSuccess {
+            tokens: vec![Value::KeyValue(name.to_string(), Box::new(value))],
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
+/// Wraps all result tokens into a single list value, like NimbleParsec's `wrap`.
+pub fn wrap(parser: Parser) -> Parser {
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        Ok(ParseSuccess {
+            tokens: vec![Value::List(ok.tokens)],
+            rest: ok.rest,
+            cursor: ok.cursor,
+        })
+    })
+}
+
+/// Replaces all result tokens with a single constant `value`, like
+/// NimbleParsec's `replace`.
+pub fn replace(parser: Parser, value: Value) -> Parser {
+    Parser::new(move |input, cursor| {
+        let ok = parser.run(input, cursor)?;
+        Ok(ParseSuccess {
+            tokens: vec![value.clone()],
             rest: ok.rest,
             cursor: ok.cursor,
         })

@@ -88,7 +88,9 @@ fn format_token(value: &Value) -> String {
     match value {
         Value::Int(n) => n.to_string(),
         Value::Str(s) => format!("s:{s}"),
+        Value::List(inner) => format!("l:({})", format_tokens(inner)),
         Value::Tagged(name, inner) => format!("t:{name}:({})", format_tokens(inner)),
+        Value::KeyValue(name, inner) => format!("kv:{name}:{}", format_token(inner)),
     }
 }
 
