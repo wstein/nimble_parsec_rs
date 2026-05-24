@@ -71,7 +71,7 @@ Status legend:
 | `quoted_repeat_while` | — | ❌ | Compile-time `repeat_while` variant. |
 | `parsec` | `ParserRef` / `recursive` | ✅ | Forward-declarable references for recursive grammars (runtime, not module-level names). |
 | `generate` | `generate` | ✅ | Seeded random input synthesis by walking the AST; round-trips for non-recursive grammars. |
-| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `defparsec!` / `defparsecp!` / `defcombinator!` / `defcombinatorp!` | ✅ | Named parse functions and combinator factories. `defparsec!`/`defparsecp!` generate specialized inline code for the codegen-supported subset (`string`, `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `ascii_char`, `utf8_char`, `empty`, `eos`); otherwise cache the runtime `Parser` in a `OnceLock`. `defcombinator!`/`defcombinatorp!` always cache via `OnceLock`. |
+| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `defparsec!` / `defparsecp!` / `defcombinator!` / `defcombinatorp!` | ✅ | Named parse functions and combinator factories. `defparsec!`/`defparsecp!` generate specialized inline code for the codegen-supported subset (`string`, `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `ascii_char`, `utf8_char`, `tag`, `unwrap_and_tag`, `wrap`, `replace`, `map`, `reduce`, `byte_offset`, `line`, `empty`, `eos`); otherwise cache the runtime `Parser` in a `OnceLock`. `defcombinator!`/`defcombinatorp!` always cache via `OnceLock`. |
 | `defparsec` (inline use) | `compile_parser!` | ✅ | Generates a specialized `Parser` backed by a native closure for fully-recognizable expressions; falls back to the unchanged runtime expression otherwise. |
 
 ## Summary
@@ -83,13 +83,14 @@ grammar is introspectable — which is what unblocked `generate`.
 
 The `defparsec!`/`defparsecp!`/`defcombinator!`/`defcombinatorp!` macro family
 is now implemented. `defparsec!`/`defparsecp!` emit specialized inline Rust (no
-`Ast` interpreter, no intermediate `Vec`s) for the codegen-supported combinator
-subset (`string`, `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `ascii_char`, `utf8_char`,
-`empty`, `eos`); grammars using combinators outside that subset fall back to a
-`OnceLock`-cached runtime parser. `compile_parser!` follows the same strategy,
-wrapping the generated code in an `Ast::Native` closure. `defcombinator!`/
-`defcombinatorp!` always use `OnceLock`-cached runtime parsers and return a
-clonable `Parser`.
+`Ast` interpreter) for the codegen-supported subset — the primitives
+(`string`, `integer_*`, `ascii_char`, `utf8_char`, `empty`, `eos`), `concat`,
+`ignore`, `choice`, and the transform/tagging/position combinators (`tag`,
+`unwrap_and_tag`, `wrap`, `replace`, `map`, `reduce`, `byte_offset`, `line`);
+grammars using combinators outside it fall back to a `OnceLock`-cached runtime
+parser. `compile_parser!` follows the same strategy, wrapping the generated code
+in an `Ast::Native` closure. `defcombinator!`/`defcombinatorp!` always use
+`OnceLock`-cached runtime parsers and return a clonable `Parser`.
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
@@ -108,14 +109,12 @@ named parsers, which belong with codegen.
 | Hand-written, same tokens | ~0.07 µs | the *fair* codegen ceiling (still allocates the result `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
 
-Codegen specialization is **implemented for the recognizable subset** (`string`,
-`integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `ascii_char`,
-`utf8_char`, `empty`, `eos`); broader coverage (the transform/tagging
-combinators and `repeat`/`optional`, which need result and context handling in
-generated code) is future work. A specializer must emit **identical tokens**,
-so its ceiling is the third row, not the bottom — and the generated code lands
-at ~0.14 µs, about **6× faster than the interpreter** and within ~2× of that
-fair ceiling.
+Codegen specialization covers the primitives, `concat`/`ignore`/`choice`, and
+the transform/tagging/position combinators (see the macro row above);
+`repeat`/`optional` and the context-threaded traversals remain future work. A
+specializer must emit **identical tokens**, so its ceiling is the third row,
+not the bottom — and the generated code lands at ~0.14 µs, about **6× faster
+than the interpreter** and within ~2× of that fair ceiling.
 
 Two earlier optimizations are folded in: `ignore`d sub-combinators allocate no
 throwaway tokens (the interpreter threads an `emit` flag so leaves under

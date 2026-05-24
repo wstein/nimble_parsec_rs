@@ -1,8 +1,23 @@
 use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     choice, concat, defcombinator, defcombinatorp, defparsec, defparsecp, ignore, integer_exact,
-    integer_min, string, Value,
+    integer_min, string, Parser, Value,
 };
+
+/// Asserts a codegen-built parser and the runtime-built equivalent agree on
+/// tokens/rest for successes and on the reason for failures, across `inputs`.
+fn assert_parity(compiled: &Parser, runtime: &Parser, inputs: &[&str]) {
+    for &input in inputs {
+        match (compiled.parse(input), runtime.parse(input)) {
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a.tokens, b.tokens, "tokens differ for {input:?}");
+                assert_eq!(a.rest, b.rest, "rest differs for {input:?}");
+            }
+            (Err(a), Err(b)) => assert_eq!(a.reason, b.reason, "reason differs for {input:?}"),
+            _ => panic!("codegen and runtime disagree on success/failure for {input:?}"),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // defparsec! — generates a public parse function with codegen
@@ -214,4 +229,106 @@ fn compile_parser_choice_matches_runtime() {
             _ => panic!("codegen and runtime disagree on success/failure for {input:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// transform/tagging codegen parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_tag_wrap_replace_match_runtime() {
+    use nimble_parsec_rs::{compile_parser, replace, tag, wrap, Value};
+
+    let tagged = compile_parser!(tag("n", integer_min(1)));
+    assert_parity(&tagged, &tag("n", integer_min(1)), &["42", "x"]);
+
+    let wrapped = compile_parser!(wrap(concat(
+        integer_exact(2),
+        concat(ignore(string("-")), integer_exact(2))
+    )));
+    let wrapped_rt = wrap(concat(
+        integer_exact(2),
+        concat(ignore(string("-")), integer_exact(2)),
+    ));
+    assert_parity(&wrapped, &wrapped_rt, &["12-34", "12x", "ab"]);
+
+    let replaced = compile_parser!(replace(integer_min(1), Value::Str("NUM".to_string())));
+    assert_parity(
+        &replaced,
+        &replace(integer_min(1), Value::Str("NUM".to_string())),
+        &["7", "x"],
+    );
+}
+
+#[test]
+fn compile_parser_map_reduce_match_runtime() {
+    use nimble_parsec_rs::{compile_parser, map, reduce, Value};
+
+    let mapped = compile_parser!(map(integer_min(1), |v| match v {
+        Value::Int(n) => Value::Int(n + Integer::from(1)),
+        other => other,
+    }));
+    let mapped_rt = map(integer_min(1), |v| match v {
+        Value::Int(n) => Value::Int(n + Integer::from(1)),
+        other => other,
+    });
+    assert_parity(&mapped, &mapped_rt, &["5", "x"]);
+
+    let reduced = compile_parser!(reduce(
+        concat(integer_min(1), concat(ignore(string(",")), integer_min(1))),
+        |tokens| {
+            let total: Integer = tokens
+                .into_iter()
+                .filter_map(|t| match t {
+                    Value::Int(n) => Some(n),
+                    _ => None,
+                })
+                .sum();
+            Value::Int(total)
+        }
+    ));
+    let reduced_rt = reduce(
+        concat(integer_min(1), concat(ignore(string(",")), integer_min(1))),
+        |tokens| {
+            let total: Integer = tokens
+                .into_iter()
+                .filter_map(|t| match t {
+                    Value::Int(n) => Some(n),
+                    _ => None,
+                })
+                .sum();
+            Value::Int(total)
+        },
+    );
+    assert_parity(&reduced, &reduced_rt, &["3,4", "3x"]);
+}
+
+#[test]
+fn compile_parser_unwrap_and_tag_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, unwrap_and_tag};
+
+    // Single token: tagged. Two tokens: must error identically.
+    let single = compile_parser!(unwrap_and_tag("n", integer_min(1)));
+    assert_parity(&single, &unwrap_and_tag("n", integer_min(1)), &["42", "x"]);
+
+    let pair = compile_parser!(unwrap_and_tag(
+        "pair",
+        concat(integer_min(1), concat(ignore(string(",")), integer_min(1)))
+    ));
+    let pair_rt = unwrap_and_tag(
+        "pair",
+        concat(integer_min(1), concat(ignore(string(",")), integer_min(1))),
+    );
+    assert_parity(&pair, &pair_rt, &["3,4", "9"]);
+}
+
+#[test]
+fn compile_parser_byte_offset_and_line_match_runtime() {
+    use nimble_parsec_rs::{byte_offset, compile_parser, line};
+
+    let bo = compile_parser!(byte_offset(integer_min(1)));
+    assert_parity(&bo, &byte_offset(integer_min(1)), &["123!", "x"]);
+
+    let ln = compile_parser!(line(integer_min(1)));
+    assert_parity(&ln, &line(integer_min(1)), &["42", "x"]);
 }

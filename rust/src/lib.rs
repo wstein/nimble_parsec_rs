@@ -948,9 +948,16 @@ pub fn debug(parser: Parser) -> Parser {
 pub mod __private {
     use super::{
         advance, describe, AsciiPredicate, Ast, Context, Cursor, Integer, ParseResult, Parser,
-        Utf8Predicate,
+        Utf8Predicate, Value,
     };
     use std::sync::Arc;
+
+    /// Applies a generated `reduce` closure. The `Fn(Vec<Value>) -> Value` bound
+    /// pins the closure's parameter type, which a bare `(f)(args)` call site in
+    /// generated code cannot infer on its own.
+    pub fn reduce_with<F: Fn(Vec<Value>) -> Value>(f: F, tokens: Vec<Value>) -> Value {
+        f(tokens)
+    }
 
     /// Parses a non-empty run of ASCII digits into an [`Integer`] (small-value
     /// fast path), for generated `integer_*` code.

@@ -425,6 +425,194 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             }})
         }
 
+        // -- transforms ---------------------------------------------------
+        // Each runs its inner with `ignored = false` (real tokens, preserving
+        // the inner's validations/effects), then operates on the tail it pushed
+        // to `__tokens` and emits its own result only when not discarded.
+        "tag" if args.len() == 2 => {
+            let name = &args[0];
+            let inner = codegen_impl(&args[1], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start);
+                    let __name: ::std::sync::Arc<str> = (#name).into();
+                    __tokens.push(::nimble_parsec_rs::Value::Tagged(
+                        ::std::string::ToString::to_string(&__name),
+                        __drained,
+                    ));
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
+        "unwrap_and_tag" if args.len() == 2 => {
+            let name = &args[0];
+            let inner = codegen_impl(&args[1], false)?;
+            let finish = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    let __value = __drained.pop().expect("length checked above");
+                    __tokens.push(::nimble_parsec_rs::Value::KeyValue(
+                        ::std::string::ToString::to_string(&__name),
+                        ::std::boxed::Box::new(__value),
+                    ));
+                }
+            };
+            Some(quote! {{
+                let __pre_input = __input;
+                let __pre_cursor = __cursor;
+                let __start = __tokens.len();
+                #inner
+                let mut __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                    __tokens.split_off(__start);
+                let __name: ::std::sync::Arc<str> = (#name).into();
+                if __drained.len() != 1 {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: ::std::format!(
+                            "expected exactly one token to unwrap_and_tag as \"{}\"",
+                            __name
+                        ),
+                        rest: __pre_input,
+                        cursor: __pre_cursor,
+                    });
+                }
+                #finish
+            }})
+        }
+
+        "wrap" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start);
+                    __tokens.push(::nimble_parsec_rs::Value::List(__drained));
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
+        "replace" if args.len() == 2 => {
+            let value = &args[1];
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! {}
+            } else {
+                quote! { __tokens.push(#value); }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                __tokens.truncate(__start);
+                #emit
+            }})
+        }
+
+        "map" if args.len() == 2 => {
+            let f = &args[1];
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __mapped: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start).into_iter().map(#f).collect();
+                    __tokens.extend(__mapped);
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
+        "reduce" if args.len() == 2 => {
+            let f = &args[1];
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start);
+                    let __reduced = ::nimble_parsec_rs::__private::reduce_with(#f, __drained);
+                    __tokens.push(__reduced);
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
+        "byte_offset" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start);
+                    __tokens.push(::nimble_parsec_rs::Value::List(::std::vec![
+                        ::nimble_parsec_rs::Value::List(__drained),
+                        ::nimble_parsec_rs::Value::Int(::nimble_parsec_rs::Integer::from(
+                            __cursor.byte_offset,
+                        )),
+                    ]));
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
+        "line" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], false)?;
+            let emit = if ignored {
+                quote! { __tokens.truncate(__start); }
+            } else {
+                quote! {
+                    let __drained: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        __tokens.split_off(__start);
+                    let __pos = ::nimble_parsec_rs::Value::List(::std::vec![
+                        ::nimble_parsec_rs::Value::Int(::nimble_parsec_rs::Integer::from(
+                            __cursor.line,
+                        )),
+                        ::nimble_parsec_rs::Value::Int(::nimble_parsec_rs::Integer::from(
+                            __cursor.line_start_offset,
+                        )),
+                    ]);
+                    __tokens.push(::nimble_parsec_rs::Value::List(::std::vec![
+                        ::nimble_parsec_rs::Value::List(__drained),
+                        __pos,
+                    ]));
+                }
+            };
+            Some(quote! {{
+                let __start = __tokens.len();
+                #inner
+                #emit
+            }})
+        }
+
         _ => None,
     }
 }
