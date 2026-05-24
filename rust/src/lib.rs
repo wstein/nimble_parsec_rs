@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use num_bigint::BigInt;
 
@@ -61,28 +61,146 @@ pub struct ParseFailure<'a> {
 
 pub type ParseResult<'a> = Result<ParseSuccess<'a>, ParseFailure<'a>>;
 
-type ParserFn = dyn for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Send + Sync;
+type MapFn = dyn Fn(Value) -> Value + Send + Sync;
+type ReduceFn = dyn Fn(Vec<Value>) -> Value + Send + Sync;
+type TraverseFn =
+    dyn Fn(Vec<Value>, Context, Cursor) -> Result<(Vec<Value>, Context), String> + Send + Sync;
+type WhileFn = dyn Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync;
+
+/// The reified parser grammar. Every combinator builds an `Ast` node; the
+/// [`Parser`] interpreter ([`run_ast`]) walks it, and `generate` samples from
+/// it. Transform combinators embed opaque closures (`map`, `reduce`,
+/// `repeat_while`, `post_traverse`, `pre_traverse`); these are run when parsing
+/// and skipped when generating, since they shape tokens, not input.
+enum Ast {
+    Empty,
+    Fail(&'static str),
+    Str(&'static str),
+    AsciiChar {
+        predicates: Vec<AsciiPredicate>,
+        reason: String,
+    },
+    Utf8Char {
+        predicates: Vec<Utf8Predicate>,
+        reason: String,
+    },
+    Utf8String {
+        predicates: Vec<Utf8Predicate>,
+        min: usize,
+        max: Option<usize>,
+    },
+    AsciiString {
+        predicates: Vec<AsciiPredicate>,
+        min: usize,
+        max: Option<usize>,
+    },
+    Bytes(usize),
+    Eos,
+    Integer {
+        min: usize,
+        max: Option<usize>,
+    },
+    Concat(Arc<Ast>, Arc<Ast>),
+    Ignore(Arc<Ast>),
+    Optional(Arc<Ast>),
+    Choice(Vec<Arc<Ast>>),
+    Repeat {
+        inner: Arc<Ast>,
+        min: usize,
+        max: Option<usize>,
+    },
+    Duplicate {
+        inner: Arc<Ast>,
+        n: usize,
+    },
+    Eventually(Arc<Ast>),
+    Lookahead(Arc<Ast>),
+    LookaheadNot(Arc<Ast>),
+    RepeatWhile {
+        inner: Arc<Ast>,
+        while_fn: Arc<WhileFn>,
+        min: usize,
+        max: Option<usize>,
+    },
+    Map(Arc<Ast>, Arc<MapFn>),
+    Reduce(Arc<Ast>, Arc<ReduceFn>),
+    Tag(&'static str, Arc<Ast>),
+    UnwrapAndTag(&'static str, Arc<Ast>),
+    Wrap(Arc<Ast>),
+    Replace(Arc<Ast>, Value),
+    Label(Arc<Ast>, &'static str),
+    ByteOffset(Arc<Ast>),
+    Line(Arc<Ast>),
+    Debug(Arc<Ast>),
+    PostTraverse(Arc<Ast>, Arc<TraverseFn>),
+    PreTraverse(Arc<Ast>, Arc<TraverseFn>),
+    Reference(Arc<OnceLock<Arc<Ast>>>),
+}
 
 #[derive(Clone)]
 pub struct Parser {
-    f: Arc<ParserFn>,
+    ast: Arc<Ast>,
 }
 
 impl Parser {
-    pub fn new<F>(f: F) -> Self
-    where
-        F: for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Send + Sync + 'static,
-    {
-        Self { f: Arc::new(f) }
+    fn from_ast(ast: Ast) -> Self {
+        Self { ast: Arc::new(ast) }
     }
 
     pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
-        (self.f)(input, cursor, context)
+        run_ast(&self.ast, input, cursor, context)
     }
 
     pub fn parse<'a>(&self, input: &'a str) -> ParseResult<'a> {
         self.run(input, Cursor::default(), Context::new())
     }
+}
+
+/// A forward-declarable parser reference enabling recursive grammars, mirroring
+/// NimbleParsec's `parsec`. Create one, use [`ParserRef::parser`] inside a
+/// definition, then supply that definition with [`ParserRef::define`]. Cloning a
+/// `ParserRef` shares the same underlying definition.
+///
+/// Left recursion is not supported (it loops forever, as in any recursive
+/// descent parser); only recurse after consuming input.
+#[derive(Clone, Default)]
+pub struct ParserRef {
+    cell: Arc<OnceLock<Arc<Ast>>>,
+}
+
+impl ParserRef {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a parser that resolves to the referenced definition at parse
+    /// time. Panics if run before [`ParserRef::define`].
+    pub fn parser(&self) -> Parser {
+        Parser {
+            ast: Arc::new(Ast::Reference(Arc::clone(&self.cell))),
+        }
+    }
+
+    /// Supplies the referenced definition. Must be called exactly once.
+    pub fn define(&self, parser: Parser) {
+        self.cell
+            .set(parser.ast)
+            .ok()
+            .expect("parsec reference was already defined");
+    }
+}
+
+/// Builds a recursive parser. `build` receives a reference to the parser being
+/// defined (usable within the returned definition) and returns that definition.
+/// Convenience wrapper over [`ParserRef`].
+pub fn recursive<F>(build: F) -> Parser
+where
+    F: FnOnce(Parser) -> Parser,
+{
+    let reference = ParserRef::new();
+    let definition = build(reference.parser());
+    reference.define(definition);
+    reference.parser()
 }
 
 #[derive(Clone, Debug)]
@@ -139,215 +257,44 @@ pub enum RepeatWhileControl {
 }
 
 pub fn empty() -> Parser {
-    Parser::new(|input, cursor, context| {
-        Ok(ParseSuccess {
-            tokens: Vec::new(),
-            rest: input,
-            cursor,
-            context,
-        })
-    })
+    Parser::from_ast(Ast::Empty)
 }
 
 pub fn concat(left: Parser, right: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut left_ok = left.run(input, cursor, context)?;
-        let right_ok = right.run(left_ok.rest, left_ok.cursor, left_ok.context)?;
-        left_ok.tokens.extend(right_ok.tokens);
-
-        Ok(ParseSuccess {
-            tokens: left_ok.tokens,
-            rest: right_ok.rest,
-            cursor: right_ok.cursor,
-            context: right_ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Concat(left.ast, right.ast))
 }
 
 pub fn ignore(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: Vec::new(),
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Ignore(parser.ast))
 }
 
 pub fn string(lit: &'static str) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        if let Some(rest) = input.strip_prefix(lit) {
-            let cursor = advance(cursor, lit);
-            Ok(ParseSuccess {
-                tokens: vec![Value::Str(lit.to_string())],
-                rest,
-                cursor,
-                context,
-            })
-        } else {
-            Err(ParseFailure {
-                reason: format!("expected string \"{}\"", lit),
-                rest: input,
-                cursor,
-            })
-        }
-    })
+    Parser::from_ast(Ast::Str(lit))
 }
 
 pub fn ascii_char(predicates: Vec<AsciiPredicate>) -> Parser {
-    // Built once at construction; failures are hot inside choice/repeat.
     let reason = format!("expected {}", describe_ascii(&predicates));
-    Parser::new(move |input, cursor, context| {
-        let Some(&b) = input.as_bytes().first() else {
-            return Err(ParseFailure {
-                reason: reason.clone(),
-                rest: input,
-                cursor,
-            });
-        };
-
-        if b > 0x7f {
-            return Err(ParseFailure {
-                reason: reason.clone(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        if !matches_ascii(b, &predicates) {
-            return Err(ParseFailure {
-                reason: reason.clone(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        let consumed = &input[..1];
-        let rest = &input[1..];
-        let cursor = advance(cursor, consumed);
-        Ok(ParseSuccess {
-            tokens: vec![Value::Int(BigInt::from(b))],
-            rest,
-            cursor,
-            context,
-        })
-    })
+    Parser::from_ast(Ast::AsciiChar { predicates, reason })
 }
 
 pub fn utf8_char(predicates: Vec<Utf8Predicate>) -> Parser {
-    // Built once at construction; failures are hot inside choice/repeat.
     let reason = format!("expected {}", describe_utf8(&predicates));
-    Parser::new(move |input, cursor, context| {
-        let Some(ch) = input.chars().next() else {
-            return Err(ParseFailure {
-                reason: reason.clone(),
-                rest: input,
-                cursor,
-            });
-        };
-
-        if !matches_utf8(ch, &predicates) {
-            return Err(ParseFailure {
-                reason: reason.clone(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        let consumed = &input[..ch.len_utf8()];
-        let rest = &input[ch.len_utf8()..];
-        let cursor = advance(cursor, consumed);
-        Ok(ParseSuccess {
-            tokens: vec![Value::Int(BigInt::from(ch as u32))],
-            rest,
-            cursor,
-            context,
-        })
-    })
+    Parser::from_ast(Ast::Utf8Char { predicates, reason })
 }
 
 pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut consumed_end = 0;
-        let mut taken = 0usize;
-
-        for (idx, ch) in input.char_indices() {
-            if let Some(max) = max {
-                if taken >= max {
-                    break;
-                }
-            }
-
-            if !matches_utf8(ch, &predicates) {
-                break;
-            }
-
-            consumed_end = idx + ch.len_utf8();
-            taken += 1;
-        }
-
-        if taken < min {
-            return Err(ParseFailure {
-                reason: "expected utf8 string with minimum length".to_string(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        let consumed = &input[..consumed_end];
-        let rest = &input[consumed_end..];
-        let cursor = advance(cursor, consumed);
-
-        Ok(ParseSuccess {
-            tokens: vec![Value::Str(consumed.to_string())],
-            rest,
-            cursor,
-            context,
-        })
+    Parser::from_ast(Ast::Utf8String {
+        predicates,
+        min,
+        max,
     })
 }
 
 pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let bytes = input.as_bytes();
-        let mut taken = 0usize;
-        let mut i = 0usize;
-
-        while i < bytes.len() {
-            if let Some(max) = max {
-                if taken >= max {
-                    break;
-                }
-            }
-
-            let b = bytes[i];
-            if b > 0x7f || !matches_ascii(b, &predicates) {
-                break;
-            }
-
-            i += 1;
-            taken += 1;
-        }
-
-        if taken < min {
-            return Err(ParseFailure {
-                reason: "expected ascii string with minimum length".to_string(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        let consumed = &input[..i];
-        let rest = &input[i..];
-        let cursor = advance(cursor, consumed);
-        Ok(ParseSuccess {
-            tokens: vec![Value::Str(consumed.to_string())],
-            rest,
-            cursor,
-            context,
-        })
+    Parser::from_ast(Ast::AsciiString {
+        predicates,
+        min,
+        max,
     })
 }
 
@@ -356,43 +303,12 @@ pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usi
 /// `count` must fall on a UTF-8 character boundary of the input, since results
 /// are returned as `&str`; otherwise the parser fails.
 pub fn bytes(count: usize) -> Parser {
-    Parser::new(move |input, cursor, context| match input.get(..count) {
-        Some(consumed) => {
-            let rest = &input[count..];
-            let cursor = advance(cursor, consumed);
-            Ok(ParseSuccess {
-                tokens: vec![Value::Str(consumed.to_string())],
-                rest,
-                cursor,
-                context,
-            })
-        }
-        None => Err(ParseFailure {
-            reason: format!("expected {count} bytes"),
-            rest: input,
-            cursor,
-        }),
-    })
+    Parser::from_ast(Ast::Bytes(count))
 }
 
 /// Succeeds only at the end of the input, emitting no tokens.
 pub fn eos() -> Parser {
-    Parser::new(|input, cursor, context| {
-        if input.is_empty() {
-            Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            })
-        } else {
-            Err(ParseFailure {
-                reason: "expected end of string".to_string(),
-                rest: input,
-                cursor,
-            })
-        }
-    })
+    Parser::from_ast(Ast::Eos)
 }
 
 pub fn integer_exact(n: usize) -> Parser {
@@ -404,90 +320,18 @@ pub fn integer_min(min: usize) -> Parser {
 }
 
 pub fn integer_range(min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let bytes = input.as_bytes();
-        let mut i = 0usize;
-
-        while i < bytes.len() {
-            if let Some(max) = max {
-                if i >= max {
-                    break;
-                }
-            }
-
-            if bytes[i].is_ascii_digit() {
-                i += 1;
-            } else {
-                break;
-            }
-        }
-
-        if i < min {
-            return Err(ParseFailure {
-                reason: "expected integer".to_string(),
-                rest: input,
-                cursor,
-            });
-        }
-
-        let consumed = &input[..i];
-        let rest = &input[i..];
-        let cursor = advance(cursor, consumed);
-        // `consumed` is a non-empty run of ASCII digits, so parsing into an
-        // arbitrary-precision integer is infallible and never overflows.
-        let value = consumed
-            .parse::<BigInt>()
-            .expect("digit run is a valid integer");
-
-        Ok(ParseSuccess {
-            tokens: vec![Value::Int(value)],
-            rest,
-            cursor,
-            context,
-        })
-    })
+    Parser::from_ast(Ast::Integer { min, max })
 }
 
 pub fn optional(parser: Parser) -> Parser {
-    Parser::new(
-        move |input, cursor, context| match parser.run(input, cursor, context.clone()) {
-            Ok(ok) => Ok(ok),
-            Err(_) => Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            }),
-        },
-    )
+    Parser::from_ast(Ast::Optional(parser.ast))
 }
 
 /// Tries each parser in order, returning the first success. If all fail, the
 /// branch failure messages are aggregated (joined with " or "), like
 /// NimbleParsec, rather than surfacing only the first.
 pub fn choice(parsers: Vec<Parser>) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut reasons = Vec::with_capacity(parsers.len());
-
-        for parser in &parsers {
-            match parser.run(input, cursor, context.clone()) {
-                Ok(ok) => return Ok(ok),
-                Err(err) => reasons.push(err.reason),
-            }
-        }
-
-        let reason = if reasons.is_empty() {
-            "choice has no options".to_string()
-        } else {
-            reasons.join(" or ")
-        };
-
-        Err(ParseFailure {
-            reason,
-            rest: input,
-            cursor,
-        })
-    })
+    Parser::from_ast(Ast::Choice(parsers.into_iter().map(|p| p.ast).collect()))
 }
 
 /// Applies `parser` between `min` and `max` (inclusive) times.
@@ -497,68 +341,17 @@ pub fn choice(parsers: Vec<Parser>) -> Parser {
 /// still enforced afterwards. This favors making progress over failing the
 /// whole parse, while still guaranteeing termination.
 pub fn repeat(parser: Parser, min: usize, max: Option<usize>) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut rest = input;
-        let mut cur = cursor;
-        let mut ctx = context;
-        let mut tokens = Vec::new();
-        let mut count = 0usize;
-
-        loop {
-            if let Some(max) = max {
-                if count >= max {
-                    break;
-                }
-            }
-
-            match parser.run(rest, cur, ctx.clone()) {
-                Ok(ok) => {
-                    if ok.rest.len() == rest.len() {
-                        // No input consumed: stop instead of spinning forever.
-                        break;
-                    }
-                    tokens.extend(ok.tokens);
-                    rest = ok.rest;
-                    cur = ok.cursor;
-                    ctx = ok.context;
-                    count += 1;
-                }
-                Err(err) => {
-                    if count < min {
-                        return Err(err);
-                    }
-                    break;
-                }
-            }
-        }
-
-        if count < min {
-            return Err(ParseFailure {
-                reason: "repeat did not reach minimum repetitions".to_string(),
-                rest,
-                cursor: cur,
-            });
-        }
-
-        Ok(ParseSuccess {
-            tokens,
-            rest,
-            cursor: cur,
-            context: ctx,
-        })
+    Parser::from_ast(Ast::Repeat {
+        inner: parser.ast,
+        min,
+        max,
     })
 }
 
 pub fn times(parser: Parser, options: TimesOptions) -> Parser {
     if let Some(max) = options.max {
         if max < options.min {
-            return Parser::new(move |input, cursor, _context| {
-                Err(ParseFailure {
-                    reason: "invalid times options: max must be >= min".to_string(),
-                    rest: input,
-                    cursor,
-                })
-            });
+            return Parser::from_ast(Ast::Fail("invalid times options: max must be >= min"));
         }
     }
 
@@ -568,26 +361,9 @@ pub fn times(parser: Parser, options: TimesOptions) -> Parser {
 /// Parses `parser` exactly `n` times in sequence, concatenating the results,
 /// like NimbleParsec's `duplicate`. With `n == 0` it matches nothing.
 pub fn duplicate(parser: Parser, n: usize) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut rest = input;
-        let mut cur = cursor;
-        let mut ctx = context;
-        let mut tokens = Vec::new();
-
-        for _ in 0..n {
-            let ok = parser.run(rest, cur, ctx)?;
-            tokens.extend(ok.tokens);
-            rest = ok.rest;
-            cur = ok.cursor;
-            ctx = ok.context;
-        }
-
-        Ok(ParseSuccess {
-            tokens,
-            rest,
-            cursor: cur,
-            context: ctx,
-        })
+    Parser::from_ast(Ast::Duplicate {
+        inner: parser.ast,
+        n,
     })
 }
 
@@ -595,62 +371,15 @@ pub fn duplicate(parser: Parser, n: usize) -> Parser {
 /// that match; the skipped prefix is discarded. Mirrors NimbleParsec's
 /// `eventually`. Fails if the inner parser never matches before end of input.
 pub fn eventually(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let mut rest = input;
-        let mut cur = cursor;
-
-        loop {
-            if let Ok(ok) = parser.run(rest, cur, context.clone()) {
-                return Ok(ok);
-            }
-
-            match rest.chars().next() {
-                Some(ch) => {
-                    let consumed = &rest[..ch.len_utf8()];
-                    cur = advance(cur, consumed);
-                    rest = &rest[ch.len_utf8()..];
-                }
-                None => {
-                    return Err(ParseFailure {
-                        reason: "expected combinator to eventually match".to_string(),
-                        rest: input,
-                        cursor,
-                    });
-                }
-            }
-        }
-    })
+    Parser::from_ast(Ast::Eventually(parser.ast))
 }
 
 pub fn lookahead(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        parser
-            .run(input, cursor, context.clone())
-            .map(|_| ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            })
-    })
+    Parser::from_ast(Ast::Lookahead(parser.ast))
 }
 
 pub fn lookahead_not(parser: Parser) -> Parser {
-    Parser::new(
-        move |input, cursor, context| match parser.run(input, cursor, context.clone()) {
-            Ok(_) => Err(ParseFailure {
-                reason: "did not expect lookahead parser to match".to_string(),
-                rest: input,
-                cursor,
-            }),
-            Err(_) => Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            }),
-        },
-    )
+    Parser::from_ast(Ast::LookaheadNot(parser.ast))
 }
 
 /// Applies `parser` while `while_fn` returns [`RepeatWhileControl::Cont`],
@@ -663,55 +392,11 @@ pub fn repeat_while<F>(parser: Parser, while_fn: F, min: usize, max: Option<usiz
 where
     F: Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor, context| {
-        let mut rest = input;
-        let mut cur = cursor;
-        let mut ctx = context;
-        let mut tokens = Vec::new();
-        let mut count = 0usize;
-
-        loop {
-            if let Some(max) = max {
-                if count >= max {
-                    break;
-                }
-            }
-
-            match while_fn(rest, cur) {
-                RepeatWhileControl::Halt => break,
-                RepeatWhileControl::Cont => {}
-            }
-
-            match parser.run(rest, cur, ctx.clone()) {
-                Ok(ok) => {
-                    if ok.rest.len() == rest.len() {
-                        // No input consumed: stop instead of spinning forever.
-                        break;
-                    }
-                    tokens.extend(ok.tokens);
-                    rest = ok.rest;
-                    cur = ok.cursor;
-                    ctx = ok.context;
-                    count += 1;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if count < min {
-            return Err(ParseFailure {
-                reason: "repeat_while did not reach minimum repetitions".to_string(),
-                rest,
-                cursor: cur,
-            });
-        }
-
-        Ok(ParseSuccess {
-            tokens,
-            rest,
-            cursor: cur,
-            context: ctx,
-        })
+    Parser::from_ast(Ast::RepeatWhile {
+        inner: parser.ast,
+        while_fn: Arc::new(while_fn),
+        min,
+        max,
     })
 }
 
@@ -720,15 +405,7 @@ pub fn map<F>(parser: Parser, f: F) -> Parser
 where
     F: Fn(Value) -> Value + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: ok.tokens.into_iter().map(&f).collect(),
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Map(parser.ast, Arc::new(f)))
 }
 
 /// Reduces all result tokens into a single token via `f`, like NimbleParsec's
@@ -737,15 +414,7 @@ pub fn reduce<F>(parser: Parser, f: F) -> Parser
 where
     F: Fn(Vec<Value>) -> Value + Send + Sync + 'static,
 {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: vec![f(ok.tokens)],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Reduce(parser.ast, Arc::new(f)))
 }
 
 /// Low-level transform: runs `parser`, then calls `f` with the results, the
@@ -760,22 +429,7 @@ where
         + Sync
         + 'static,
 {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        match f(ok.tokens, ok.context, ok.cursor) {
-            Ok((tokens, context)) => Ok(ParseSuccess {
-                tokens,
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context,
-            }),
-            Err(reason) => Err(ParseFailure {
-                reason,
-                rest: ok.rest,
-                cursor: ok.cursor,
-            }),
-        }
-    })
+    Parser::from_ast(Ast::PostTraverse(parser.ast, Arc::new(f)))
 }
 
 /// Like [`post_traverse`], but `f` receives the position *before* the
@@ -787,227 +441,653 @@ where
         + Sync
         + 'static,
 {
-    Parser::new(move |input, cursor, context| {
-        let before = cursor;
-        let ok = parser.run(input, cursor, context)?;
-        match f(ok.tokens, ok.context, before) {
-            Ok((tokens, context)) => Ok(ParseSuccess {
-                tokens,
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context,
-            }),
-            Err(reason) => Err(ParseFailure {
-                reason,
-                rest: ok.rest,
-                cursor: ok.cursor,
-            }),
-        }
-    })
+    Parser::from_ast(Ast::PreTraverse(parser.ast, Arc::new(f)))
 }
 
 pub fn tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: vec![Value::Tagged(name.to_string(), ok.tokens)],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Tag(name, parser.ast))
 }
 
 /// Tags a single result token, like NimbleParsec's `unwrap_and_tag`. Fails if
 /// the combinator does not emit exactly one token.
 pub fn unwrap_and_tag(name: &'static str, parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        let mut tokens = ok.tokens;
-        if tokens.len() != 1 {
-            return Err(ParseFailure {
-                reason: format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
-                rest: input,
-                cursor,
-            });
-        }
-        let value = tokens.pop().expect("length checked above");
-        Ok(ParseSuccess {
-            tokens: vec![Value::KeyValue(name.to_string(), Box::new(value))],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::UnwrapAndTag(name, parser.ast))
 }
 
 /// Wraps all result tokens into a single list value, like NimbleParsec's `wrap`.
 pub fn wrap(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: vec![Value::List(ok.tokens)],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Wrap(parser.ast))
 }
 
 /// Replaces all result tokens with a single constant `value`, like
 /// NimbleParsec's `replace`.
 pub fn replace(parser: Parser, value: Value) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        Ok(ParseSuccess {
-            tokens: vec![value.clone()],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Replace(parser.ast, value))
 }
 
 /// Replaces the failure message of `parser` with `expected <label>`, like
 /// NimbleParsec's `label`. The failure position is preserved; success passes
 /// through unchanged.
 pub fn label(parser: Parser, label: &'static str) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        parser
-            .run(input, cursor, context)
-            .map_err(|err| ParseFailure {
-                reason: format!("expected {label}"),
-                rest: err.rest,
-                cursor: err.cursor,
-            })
-    })
+    Parser::from_ast(Ast::Label(parser.ast, label))
 }
 
 /// Wraps `parser`'s results with the trailing byte offset, like NimbleParsec's
 /// `byte_offset`. Emits a single pair `List([List(results), Int(offset)])`,
 /// where `offset` is the byte offset after the wrapped combinator.
 pub fn byte_offset(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        let token = Value::List(vec![
-            Value::List(ok.tokens),
-            Value::Int(BigInt::from(ok.cursor.byte_offset)),
-        ]);
-        Ok(ParseSuccess {
-            tokens: vec![token],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::ByteOffset(parser.ast))
 }
 
 /// Wraps `parser`'s results with the trailing line position, like NimbleParsec's
 /// `line`. Emits a single pair `List([List(results), List([line, line_offset])])`,
 /// where `line_offset` is the byte offset immediately after the last newline.
 pub fn line(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        let ok = parser.run(input, cursor, context)?;
-        let position = Value::List(vec![
-            Value::Int(BigInt::from(ok.cursor.line)),
-            Value::Int(BigInt::from(ok.cursor.line_start_offset)),
-        ]);
-        let token = Value::List(vec![Value::List(ok.tokens), position]);
-        Ok(ParseSuccess {
-            tokens: vec![token],
-            rest: ok.rest,
-            cursor: ok.cursor,
-            context: ok.context,
-        })
-    })
+    Parser::from_ast(Ast::Line(parser.ast))
 }
 
 /// Prints the parser state around `parser` to stderr (the input before, and the
 /// result after) and passes the result through unchanged, like NimbleParsec's
 /// `debug`.
 pub fn debug(parser: Parser) -> Parser {
-    Parser::new(move |input, cursor, context| {
-        eprintln!("debug: parsing {input:?} at {cursor:?}");
-        let result = parser.run(input, cursor, context);
-        match &result {
-            Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
-            Err(err) => eprintln!("debug: error {:?}", err.reason),
+    Parser::from_ast(Ast::Debug(parser.ast))
+}
+
+fn run_ast<'a>(
+    ast: &Arc<Ast>,
+    input: &'a str,
+    cursor: Cursor,
+    context: Context,
+) -> ParseResult<'a> {
+    match ast.as_ref() {
+        Ast::Empty => Ok(ParseSuccess {
+            tokens: Vec::new(),
+            rest: input,
+            cursor,
+            context,
+        }),
+
+        Ast::Fail(reason) => Err(ParseFailure {
+            reason: (*reason).to_string(),
+            rest: input,
+            cursor,
+        }),
+
+        Ast::Str(lit) => {
+            if let Some(rest) = input.strip_prefix(*lit) {
+                Ok(ParseSuccess {
+                    tokens: vec![Value::Str((*lit).to_string())],
+                    rest,
+                    cursor: advance(cursor, lit),
+                    context,
+                })
+            } else {
+                Err(ParseFailure {
+                    reason: format!("expected string \"{}\"", lit),
+                    rest: input,
+                    cursor,
+                })
+            }
         }
-        result
-    })
-}
 
-/// A forward-declarable parser reference enabling recursive grammars, mirroring
-/// NimbleParsec's `parsec`. Create one, use [`ParserRef::parser`] inside a
-/// definition, then supply that definition with [`ParserRef::define`]. Cloning a
-/// `ParserRef` shares the same underlying definition.
-///
-/// Left recursion is not supported (it loops forever, as in any recursive
-/// descent parser); only recurse after consuming input.
-#[derive(Clone, Default)]
-pub struct ParserRef {
-    cell: Arc<std::sync::OnceLock<Parser>>,
-}
+        Ast::AsciiChar { predicates, reason } => {
+            let Some(&b) = input.as_bytes().first() else {
+                return Err(ParseFailure {
+                    reason: reason.clone(),
+                    rest: input,
+                    cursor,
+                });
+            };
+            if b > 0x7f || !matches_ascii(b, predicates) {
+                return Err(ParseFailure {
+                    reason: reason.clone(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let consumed = &input[..1];
+            Ok(ParseSuccess {
+                tokens: vec![Value::Int(BigInt::from(b))],
+                rest: &input[1..],
+                cursor: advance(cursor, consumed),
+                context,
+            })
+        }
 
-impl ParserRef {
-    pub fn new() -> Self {
-        Self::default()
-    }
+        Ast::Utf8Char { predicates, reason } => {
+            let Some(ch) = input.chars().next() else {
+                return Err(ParseFailure {
+                    reason: reason.clone(),
+                    rest: input,
+                    cursor,
+                });
+            };
+            if !matches_utf8(ch, predicates) {
+                return Err(ParseFailure {
+                    reason: reason.clone(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let consumed = &input[..ch.len_utf8()];
+            Ok(ParseSuccess {
+                tokens: vec![Value::Int(BigInt::from(ch as u32))],
+                rest: &input[ch.len_utf8()..],
+                cursor: advance(cursor, consumed),
+                context,
+            })
+        }
 
-    /// Returns a parser that resolves to the referenced definition at parse
-    /// time. Panics if run before [`ParserRef::define`].
-    pub fn parser(&self) -> Parser {
-        let cell = Arc::clone(&self.cell);
-        Parser::new(move |input, cursor, context| {
-            let parser = cell
+        Ast::Utf8String {
+            predicates,
+            min,
+            max,
+        } => {
+            let mut consumed_end = 0;
+            let mut taken = 0usize;
+            for (idx, ch) in input.char_indices() {
+                if let Some(max) = max {
+                    if taken >= *max {
+                        break;
+                    }
+                }
+                if !matches_utf8(ch, predicates) {
+                    break;
+                }
+                consumed_end = idx + ch.len_utf8();
+                taken += 1;
+            }
+            if taken < *min {
+                return Err(ParseFailure {
+                    reason: "expected utf8 string with minimum length".to_string(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let consumed = &input[..consumed_end];
+            Ok(ParseSuccess {
+                tokens: vec![Value::Str(consumed.to_string())],
+                rest: &input[consumed_end..],
+                cursor: advance(cursor, consumed),
+                context,
+            })
+        }
+
+        Ast::AsciiString {
+            predicates,
+            min,
+            max,
+        } => {
+            let raw = input.as_bytes();
+            let mut taken = 0usize;
+            let mut i = 0usize;
+            while i < raw.len() {
+                if let Some(max) = max {
+                    if taken >= *max {
+                        break;
+                    }
+                }
+                let b = raw[i];
+                if b > 0x7f || !matches_ascii(b, predicates) {
+                    break;
+                }
+                i += 1;
+                taken += 1;
+            }
+            if taken < *min {
+                return Err(ParseFailure {
+                    reason: "expected ascii string with minimum length".to_string(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let consumed = &input[..i];
+            Ok(ParseSuccess {
+                tokens: vec![Value::Str(consumed.to_string())],
+                rest: &input[i..],
+                cursor: advance(cursor, consumed),
+                context,
+            })
+        }
+
+        Ast::Bytes(count) => match input.get(..*count) {
+            Some(consumed) => Ok(ParseSuccess {
+                tokens: vec![Value::Str(consumed.to_string())],
+                rest: &input[*count..],
+                cursor: advance(cursor, consumed),
+                context,
+            }),
+            None => Err(ParseFailure {
+                reason: format!("expected {count} bytes"),
+                rest: input,
+                cursor,
+            }),
+        },
+
+        Ast::Eos => {
+            if input.is_empty() {
+                Ok(ParseSuccess {
+                    tokens: Vec::new(),
+                    rest: input,
+                    cursor,
+                    context,
+                })
+            } else {
+                Err(ParseFailure {
+                    reason: "expected end of string".to_string(),
+                    rest: input,
+                    cursor,
+                })
+            }
+        }
+
+        Ast::Integer { min, max } => {
+            let raw = input.as_bytes();
+            let mut i = 0usize;
+            while i < raw.len() {
+                if let Some(max) = max {
+                    if i >= *max {
+                        break;
+                    }
+                }
+                if raw[i].is_ascii_digit() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            if i < *min {
+                return Err(ParseFailure {
+                    reason: "expected integer".to_string(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let consumed = &input[..i];
+            let value = consumed
+                .parse::<BigInt>()
+                .expect("digit run is a valid integer");
+            Ok(ParseSuccess {
+                tokens: vec![Value::Int(value)],
+                rest: &input[i..],
+                cursor: advance(cursor, consumed),
+                context,
+            })
+        }
+
+        Ast::Concat(left, right) => {
+            let mut left_ok = run_ast(left, input, cursor, context)?;
+            let right_ok = run_ast(right, left_ok.rest, left_ok.cursor, left_ok.context)?;
+            left_ok.tokens.extend(right_ok.tokens);
+            Ok(ParseSuccess {
+                tokens: left_ok.tokens,
+                rest: right_ok.rest,
+                cursor: right_ok.cursor,
+                context: right_ok.context,
+            })
+        }
+
+        Ast::Ignore(inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Optional(inner) => match run_ast(inner, input, cursor, context.clone()) {
+            Ok(ok) => Ok(ok),
+            Err(_) => Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            }),
+        },
+
+        Ast::Choice(choices) => {
+            let mut reasons = Vec::with_capacity(choices.len());
+            for choice in choices {
+                match run_ast(choice, input, cursor, context.clone()) {
+                    Ok(ok) => return Ok(ok),
+                    Err(err) => reasons.push(err.reason),
+                }
+            }
+            let reason = if reasons.is_empty() {
+                "choice has no options".to_string()
+            } else {
+                reasons.join(" or ")
+            };
+            Err(ParseFailure {
+                reason,
+                rest: input,
+                cursor,
+            })
+        }
+
+        Ast::Repeat { inner, min, max } => {
+            let mut rest = input;
+            let mut cur = cursor;
+            let mut ctx = context;
+            let mut tokens = Vec::new();
+            let mut count = 0usize;
+            loop {
+                if let Some(max) = max {
+                    if count >= *max {
+                        break;
+                    }
+                }
+                match run_ast(inner, rest, cur, ctx.clone()) {
+                    Ok(ok) => {
+                        if ok.rest.len() == rest.len() {
+                            break;
+                        }
+                        tokens.extend(ok.tokens);
+                        rest = ok.rest;
+                        cur = ok.cursor;
+                        ctx = ok.context;
+                        count += 1;
+                    }
+                    Err(err) => {
+                        if count < *min {
+                            return Err(err);
+                        }
+                        break;
+                    }
+                }
+            }
+            if count < *min {
+                return Err(ParseFailure {
+                    reason: "repeat did not reach minimum repetitions".to_string(),
+                    rest,
+                    cursor: cur,
+                });
+            }
+            Ok(ParseSuccess {
+                tokens,
+                rest,
+                cursor: cur,
+                context: ctx,
+            })
+        }
+
+        Ast::Duplicate { inner, n } => {
+            let mut rest = input;
+            let mut cur = cursor;
+            let mut ctx = context;
+            let mut tokens = Vec::new();
+            for _ in 0..*n {
+                let ok = run_ast(inner, rest, cur, ctx)?;
+                tokens.extend(ok.tokens);
+                rest = ok.rest;
+                cur = ok.cursor;
+                ctx = ok.context;
+            }
+            Ok(ParseSuccess {
+                tokens,
+                rest,
+                cursor: cur,
+                context: ctx,
+            })
+        }
+
+        Ast::Eventually(inner) => {
+            let mut rest = input;
+            let mut cur = cursor;
+            loop {
+                if let Ok(ok) = run_ast(inner, rest, cur, context.clone()) {
+                    return Ok(ok);
+                }
+                match rest.chars().next() {
+                    Some(ch) => {
+                        let consumed = &rest[..ch.len_utf8()];
+                        cur = advance(cur, consumed);
+                        rest = &rest[ch.len_utf8()..];
+                    }
+                    None => {
+                        return Err(ParseFailure {
+                            reason: "expected combinator to eventually match".to_string(),
+                            rest: input,
+                            cursor,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ast::Lookahead(inner) => {
+            run_ast(inner, input, cursor, context.clone()).map(|_| ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            })
+        }
+
+        Ast::LookaheadNot(inner) => match run_ast(inner, input, cursor, context.clone()) {
+            Ok(_) => Err(ParseFailure {
+                reason: "did not expect lookahead parser to match".to_string(),
+                rest: input,
+                cursor,
+            }),
+            Err(_) => Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+                context,
+            }),
+        },
+
+        Ast::RepeatWhile {
+            inner,
+            while_fn,
+            min,
+            max,
+        } => {
+            let mut rest = input;
+            let mut cur = cursor;
+            let mut ctx = context;
+            let mut tokens = Vec::new();
+            let mut count = 0usize;
+            loop {
+                if let Some(max) = max {
+                    if count >= *max {
+                        break;
+                    }
+                }
+                match while_fn(rest, cur) {
+                    RepeatWhileControl::Halt => break,
+                    RepeatWhileControl::Cont => {}
+                }
+                match run_ast(inner, rest, cur, ctx.clone()) {
+                    Ok(ok) => {
+                        if ok.rest.len() == rest.len() {
+                            break;
+                        }
+                        tokens.extend(ok.tokens);
+                        rest = ok.rest;
+                        cur = ok.cursor;
+                        ctx = ok.context;
+                        count += 1;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if count < *min {
+                return Err(ParseFailure {
+                    reason: "repeat_while did not reach minimum repetitions".to_string(),
+                    rest,
+                    cursor: cur,
+                });
+            }
+            Ok(ParseSuccess {
+                tokens,
+                rest,
+                cursor: cur,
+                context: ctx,
+            })
+        }
+
+        Ast::Map(inner, f) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: ok.tokens.into_iter().map(|v| f(v)).collect(),
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Reduce(inner, f) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: vec![f(ok.tokens)],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Tag(name, inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: vec![Value::Tagged((*name).to_string(), ok.tokens)],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::UnwrapAndTag(name, inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            let mut tokens = ok.tokens;
+            if tokens.len() != 1 {
+                return Err(ParseFailure {
+                    reason: format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
+                    rest: input,
+                    cursor,
+                });
+            }
+            let value = tokens.pop().expect("length checked above");
+            Ok(ParseSuccess {
+                tokens: vec![Value::KeyValue((*name).to_string(), Box::new(value))],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Wrap(inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: vec![Value::List(ok.tokens)],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Replace(inner, value) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            Ok(ParseSuccess {
+                tokens: vec![value.clone()],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Label(inner, lbl) => {
+            run_ast(inner, input, cursor, context).map_err(|err| ParseFailure {
+                reason: format!("expected {lbl}"),
+                rest: err.rest,
+                cursor: err.cursor,
+            })
+        }
+
+        Ast::ByteOffset(inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            let token = Value::List(vec![
+                Value::List(ok.tokens),
+                Value::Int(BigInt::from(ok.cursor.byte_offset)),
+            ]);
+            Ok(ParseSuccess {
+                tokens: vec![token],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Line(inner) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            let position = Value::List(vec![
+                Value::Int(BigInt::from(ok.cursor.line)),
+                Value::Int(BigInt::from(ok.cursor.line_start_offset)),
+            ]);
+            let token = Value::List(vec![Value::List(ok.tokens), position]);
+            Ok(ParseSuccess {
+                tokens: vec![token],
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
+
+        Ast::Debug(inner) => {
+            eprintln!("debug: parsing {input:?} at {cursor:?}");
+            let result = run_ast(inner, input, cursor, context);
+            match &result {
+                Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
+                Err(err) => eprintln!("debug: error {:?}", err.reason),
+            }
+            result
+        }
+
+        Ast::PostTraverse(inner, f) => {
+            let ok = run_ast(inner, input, cursor, context)?;
+            match f(ok.tokens, ok.context, ok.cursor) {
+                Ok((tokens, context)) => Ok(ParseSuccess {
+                    tokens,
+                    rest: ok.rest,
+                    cursor: ok.cursor,
+                    context,
+                }),
+                Err(reason) => Err(ParseFailure {
+                    reason,
+                    rest: ok.rest,
+                    cursor: ok.cursor,
+                }),
+            }
+        }
+
+        Ast::PreTraverse(inner, f) => {
+            let before = cursor;
+            let ok = run_ast(inner, input, cursor, context)?;
+            match f(ok.tokens, ok.context, before) {
+                Ok((tokens, context)) => Ok(ParseSuccess {
+                    tokens,
+                    rest: ok.rest,
+                    cursor: ok.cursor,
+                    context,
+                }),
+                Err(reason) => Err(ParseFailure {
+                    reason,
+                    rest: ok.rest,
+                    cursor: ok.cursor,
+                }),
+            }
+        }
+
+        Ast::Reference(cell) => {
+            let inner = cell
                 .get()
                 .expect("parsec reference used before it was defined");
-            parser.run(input, cursor, context)
-        })
-    }
-
-    /// Supplies the referenced definition. Must be called exactly once.
-    pub fn define(&self, parser: Parser) {
-        self.cell
-            .set(parser)
-            .ok()
-            .expect("parsec reference was already defined");
-    }
-}
-
-/// Builds a recursive parser. `build` receives a reference to the parser being
-/// defined (usable within the returned definition) and returns that definition.
-/// Convenience wrapper over [`ParserRef`].
-pub fn recursive<F>(build: F) -> Parser
-where
-    F: FnOnce(Parser) -> Parser,
-{
-    let reference = ParserRef::new();
-    let definition = build(reference.parser());
-    reference.define(definition);
-    reference.parser()
-}
-
-/// Shared positive/negative membership rule for character predicates.
-///
-/// Each item is `(is_negative, contains)`. A value is accepted when it hits at
-/// least one positive predicate (or there are none) and no negative predicate.
-/// An empty set therefore accepts any value, matching NimbleParsec's `[]`.
-fn matches_ranges(predicates: impl IntoIterator<Item = (bool, bool)>) -> bool {
-    let mut has_positive = false;
-    let mut positive_hit = false;
-    let mut negative_hit = false;
-
-    for (is_negative, contains) in predicates {
-        if is_negative {
-            negative_hit |= contains;
-        } else {
-            has_positive = true;
-            positive_hit |= contains;
+            run_ast(inner, input, cursor, context)
         }
     }
-
-    (!has_positive || positive_hit) && !negative_hit
 }
 
 /// Renders a printable byte as `"x"` (matching Elixir's `inspect/1` of a
@@ -1089,6 +1169,28 @@ fn describe_utf8(predicates: &[Utf8Predicate]) -> String {
         }
     }
     compose_label("utf8 codepoint", inclusive, exclusive)
+}
+
+/// Shared positive/negative membership rule for character predicates.
+///
+/// Each item is `(is_negative, contains)`. A value is accepted when it hits at
+/// least one positive predicate (or there are none) and no negative predicate.
+/// An empty set therefore accepts any value, matching NimbleParsec's `[]`.
+fn matches_ranges(predicates: impl IntoIterator<Item = (bool, bool)>) -> bool {
+    let mut has_positive = false;
+    let mut positive_hit = false;
+    let mut negative_hit = false;
+
+    for (is_negative, contains) in predicates {
+        if is_negative {
+            negative_hit |= contains;
+        } else {
+            has_positive = true;
+            positive_hit |= contains;
+        }
+    }
+
+    (!has_positive || positive_hit) && !negative_hit
 }
 
 fn matches_ascii(b: u8, predicates: &[AsciiPredicate]) -> bool {
