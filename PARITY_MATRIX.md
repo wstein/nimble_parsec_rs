@@ -21,10 +21,10 @@ Status legend:
 | `ascii_char` | `ascii_char` | ✅ | Emits the matched byte as an integer codepoint. |
 | `utf8_char` | `utf8_char` | ✅ | Codepoint-range predicates via `Utf8Predicate`. |
 | `utf8_string` | `utf8_string` | ✅ | Signature `(predicates, min, max)`; ranges honored. |
-| `ascii_string` | — | ❌ | ASCII analogue of `utf8_string` (ranges + count). |
+| `ascii_string` | `ascii_string` | ✅ | Signature `(predicates, min, max)`; emits a string. |
 | `integer` | `integer_exact` / `integer_min` / `integer_range` | ✅ | Arbitrary precision; Elixir's overloaded arity is split into three. |
-| `bytes` | — | ❌ | Consume exactly N bytes. |
-| `eos` | — | ❌ | End-of-string assertion. |
+| `bytes` | `bytes` | ✅ | Consumes exactly N bytes; N must fall on a UTF-8 boundary. |
+| `eos` | `eos` | ✅ | End-of-string assertion. |
 
 ## Combination & control flow
 

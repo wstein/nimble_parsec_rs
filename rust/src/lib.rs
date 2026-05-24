@@ -290,6 +290,89 @@ pub fn utf8_string(predicates: Vec<Utf8Predicate>, min: usize, max: Option<usize
     })
 }
 
+pub fn ascii_string(predicates: Vec<AsciiPredicate>, min: usize, max: Option<usize>) -> Parser {
+    Parser::new(move |input, cursor| {
+        let bytes = input.as_bytes();
+        let mut taken = 0usize;
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            if let Some(max) = max {
+                if taken >= max {
+                    break;
+                }
+            }
+
+            let b = bytes[i];
+            if b > 0x7f || !matches_ascii(b, &predicates) {
+                break;
+            }
+
+            i += 1;
+            taken += 1;
+        }
+
+        if taken < min {
+            return Err(ParseFailure {
+                reason: "expected ascii string with minimum length".to_string(),
+                rest: input,
+                cursor,
+            });
+        }
+
+        let consumed = &input[..i];
+        let rest = &input[i..];
+        let cursor = advance(cursor, consumed);
+        Ok(ParseSuccess {
+            tokens: vec![Value::Str(consumed.to_string())],
+            rest,
+            cursor,
+        })
+    })
+}
+
+/// Consumes exactly `count` bytes and emits them as a string.
+///
+/// `count` must fall on a UTF-8 character boundary of the input, since results
+/// are returned as `&str`; otherwise the parser fails.
+pub fn bytes(count: usize) -> Parser {
+    Parser::new(move |input, cursor| match input.get(..count) {
+        Some(consumed) => {
+            let rest = &input[count..];
+            let cursor = advance(cursor, consumed);
+            Ok(ParseSuccess {
+                tokens: vec![Value::Str(consumed.to_string())],
+                rest,
+                cursor,
+            })
+        }
+        None => Err(ParseFailure {
+            reason: format!("expected {count} bytes"),
+            rest: input,
+            cursor,
+        }),
+    })
+}
+
+/// Succeeds only at the end of the input, emitting no tokens.
+pub fn eos() -> Parser {
+    Parser::new(|input, cursor| {
+        if input.is_empty() {
+            Ok(ParseSuccess {
+                tokens: Vec::new(),
+                rest: input,
+                cursor,
+            })
+        } else {
+            Err(ParseFailure {
+                reason: "expected end of string".to_string(),
+                rest: input,
+                cursor,
+            })
+        }
+    })
+}
+
 pub fn integer_exact(n: usize) -> Parser {
     integer_range(n, Some(n))
 }

@@ -14,6 +14,8 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `string`
   - `ascii_char` with positive and negative predicates (emits the matched byte as an integer codepoint, like NimbleParsec)
   - `utf8_char` and `utf8_string(predicates, min, max)` with codepoint-range predicates
+  - `ascii_string(predicates, min, max)`
+  - `bytes`, `eos`
   - `integer_exact`, `integer_min`, `integer_range` (arbitrary precision, matching NimbleParsec's unbounded BEAM integers)
   - `optional`
   - `choice`
