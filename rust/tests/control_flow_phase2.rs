@@ -1,8 +1,37 @@
 use nimble_parsec_rs::{
-    ascii_char, concat, integer_min, lookahead, lookahead_not, optional, repeat_while, string,
-    times, AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
+    ascii_char, concat, integer_min, lookahead, lookahead_not, optional, post_traverse,
+    repeat_while, string, times, AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
 };
 use num_bigint::BigInt;
+
+#[test]
+fn repeat_while_predicate_reads_threaded_context() {
+    // Inner counts digits into the context; the predicate halts once the count
+    // reaches 2 — exercising context flowing into the while callback.
+    let inner = post_traverse(
+        ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
+        |tokens, mut ctx, _| {
+            let n = match ctx.get("count") {
+                Some(Value::Int(n)) => n.clone(),
+                _ => BigInt::from(0),
+            };
+            ctx.insert("count".to_string(), Value::Int(n + 1));
+            Ok((tokens, ctx))
+        },
+    );
+    let parser = repeat_while(
+        inner,
+        |_, _, ctx| match ctx.get("count") {
+            Some(Value::Int(n)) if *n >= BigInt::from(2) => RepeatWhileControl::Halt,
+            _ => RepeatWhileControl::Cont,
+        },
+        0,
+        None,
+    );
+
+    let ok = parser.parse("12345").expect("parses");
+    assert_eq!(ok.rest, "345");
+}
 
 fn ch(c: char) -> Value {
     Value::Int(BigInt::from(c as u32))
@@ -43,7 +72,7 @@ fn repeat_while_stops_on_predicate() {
             ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
             ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
         ),
-        |rest, _| {
+        |rest, _, _| {
             if rest.starts_with('3') {
                 RepeatWhileControl::Halt
             } else {
@@ -77,7 +106,7 @@ fn repeat_while_stops_on_non_consuming_match() {
     // even though the while predicate keeps saying Cont.
     let parser = repeat_while(
         optional(string("x")),
-        |_, _| RepeatWhileControl::Cont,
+        |_, _, _| RepeatWhileControl::Cont,
         0,
         None,
     );

@@ -255,7 +255,7 @@ fn repeat_while_digits_parser() -> nimble_parsec_rs::Parser {
             ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
             ascii_char(vec![AsciiPredicate::Range(b'0'..=b'9')]),
         ),
-        |rest, _| {
+        |rest, _, _| {
             if rest.starts_with('3') {
                 RepeatWhileControl::Halt
             } else {

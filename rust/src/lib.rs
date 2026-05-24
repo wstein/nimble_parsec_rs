@@ -105,7 +105,7 @@ type MapFn = dyn Fn(Value) -> Value + Send + Sync;
 type ReduceFn = dyn Fn(Vec<Value>) -> Value + Send + Sync;
 type TraverseFn =
     dyn Fn(Vec<Value>, Context, Cursor) -> Result<(Vec<Value>, Context), String> + Send + Sync;
-type WhileFn = dyn Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync;
+type WhileFn = dyn Fn(&str, Cursor, &Context) -> RepeatWhileControl + Send + Sync;
 type NativeFn = dyn for<'a> Fn(&'a str, Cursor, Context) -> ParseResult<'a> + Send + Sync;
 
 /// The reified parser grammar. Every combinator builds an `Ast` node; the
@@ -653,14 +653,16 @@ pub fn lookahead_not(parser: Parser) -> Parser {
 }
 
 /// Applies `parser` while `while_fn` returns [`RepeatWhileControl::Cont`],
-/// between `min` and `max` (inclusive) times.
+/// between `min` and `max` (inclusive) times. The predicate receives the
+/// remaining input, the current [`Cursor`], and the threaded [`Context`],
+/// mirroring NimbleParsec's `while` callback.
 ///
 /// Like [`repeat`], a successful iteration that consumes no input ends the
 /// repetition instead of looping forever; the `min` bound is enforced once the
 /// loop stops.
 pub fn repeat_while<F>(parser: Parser, while_fn: F, min: usize, max: Option<usize>) -> Parser
 where
-    F: Fn(&str, Cursor) -> RepeatWhileControl + Send + Sync + 'static,
+    F: Fn(&str, Cursor, &Context) -> RepeatWhileControl + Send + Sync + 'static,
 {
     Parser::from_ast(Ast::RepeatWhile {
         inner: parser.ast,
@@ -1185,7 +1187,7 @@ fn run_ast<'a>(
                         break;
                     }
                 }
-                match while_fn(rest, cur) {
+                match while_fn(rest, cur, &ctx) {
                     RepeatWhileControl::Halt => break,
                     RepeatWhileControl::Cont => {}
                 }
