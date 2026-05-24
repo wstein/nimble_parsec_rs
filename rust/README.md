@@ -24,6 +24,7 @@ It intentionally starts with runtime combinators and parity tests before attempt
   - `lookahead`, `lookahead_not`
   - `map` (per element), `reduce` (all results into one)
   - `tag`, `unwrap_and_tag`, `wrap`, `replace`
+  - `label` (custom failure messages)
 
   ## Benchmark scaffold
 

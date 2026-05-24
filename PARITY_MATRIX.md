@@ -52,7 +52,7 @@ Status legend:
 | `reduce` | `reduce` | ✅ | Reduces all results into a single value (`Vec<Value> → Value`). |
 | `wrap` | `wrap` | ✅ | Wraps results in a single list value (`Value::List`). |
 | `replace` | `replace` | ✅ | Replaces results with a constant value. |
-| `label` | — | ❌ | Override the failure message. |
+| `label` | `label` | ✅ | Overrides the failure message with `expected <label>`. |
 | `debug` | — | ❌ | Print parser state for debugging. |
 
 ## Position metadata

@@ -755,6 +755,19 @@ pub fn replace(parser: Parser, value: Value) -> Parser {
     })
 }
 
+/// Replaces the failure message of `parser` with `expected <label>`, like
+/// NimbleParsec's `label`. The failure position is preserved; success passes
+/// through unchanged.
+pub fn label(parser: Parser, label: &'static str) -> Parser {
+    Parser::new(move |input, cursor| {
+        parser.run(input, cursor).map_err(|err| ParseFailure {
+            reason: format!("expected {label}"),
+            rest: err.rest,
+            cursor: err.cursor,
+        })
+    })
+}
+
 /// Shared positive/negative membership rule for character predicates.
 ///
 /// Each item is `(is_negative, contains)`. A value is accepted when it hits at
