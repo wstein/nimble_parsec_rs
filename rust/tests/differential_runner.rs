@@ -6,8 +6,23 @@ use nimble_parsec_rs::{
     AsciiPredicate, RepeatWhileControl, Value,
 };
 
+/// True when an Elixir `mix` is runnable, so the differential test can be
+/// skipped gracefully on machines (e.g. CI) without the Elixir toolchain.
+fn mix_available() -> bool {
+    Command::new("mix")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn differential_runner_matches_shared_elixir_scenarios() {
+    if !mix_available() {
+        eprintln!("skipping differential test: `mix` is not available on PATH");
+        return;
+    }
+
     let output = Command::new("mix")
         .arg("run")
         .arg("rust/tests/fixtures/differential_cases.exs")
