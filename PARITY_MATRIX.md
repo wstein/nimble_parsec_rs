@@ -32,7 +32,7 @@ Status legend:
 | --- | --- | --- | --- |
 | `concat` | `concat` | ✅ | |
 | `optional` | `optional` | ✅ | |
-| `choice` | `choice` | ⚠️ | Returns the first branch's error; Elixir aggregates labels. |
+| `choice` | `choice` | ✅ | Aggregates branch failure messages (joined with " or "). |
 | `repeat` | `repeat` | ✅ | Non-consuming match stops the loop, then `min` is enforced. |
 | `repeat_while` | `repeat_while` | ✅ | Takes a native closure instead of an MFA. |
 | `times` | `times` | ✅ | |
@@ -86,6 +86,3 @@ rows are not drop-in combinators but four larger design efforts:
 3. **Generators** (`generate`) — random input synthesis from a parser.
 4. **Compile-time code generation** (`defparsec` family) — the proc-macro
    specialization that gives NimbleParsec its performance.
-
-One ⚠️ remains within ported combinators: `choice` returns the first branch's
-error rather than aggregating labels across branches.

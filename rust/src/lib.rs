@@ -436,23 +436,31 @@ pub fn optional(parser: Parser) -> Parser {
     })
 }
 
+/// Tries each parser in order, returning the first success. If all fail, the
+/// branch failure messages are aggregated (joined with " or "), like
+/// NimbleParsec, rather than surfacing only the first.
 pub fn choice(parsers: Vec<Parser>) -> Parser {
     Parser::new(move |input, cursor| {
-        let mut first_error: Option<ParseFailure<'_>> = None;
+        let mut reasons = Vec::with_capacity(parsers.len());
 
         for parser in &parsers {
             match parser.run(input, cursor) {
                 Ok(ok) => return Ok(ok),
-                Err(err) if first_error.is_none() => first_error = Some(err),
-                Err(_) => {}
+                Err(err) => reasons.push(err.reason),
             }
         }
 
-        Err(first_error.unwrap_or(ParseFailure {
-            reason: "choice has no options".to_string(),
+        let reason = if reasons.is_empty() {
+            "choice has no options".to_string()
+        } else {
+            reasons.join(" or ")
+        };
+
+        Err(ParseFailure {
+            reason,
             rest: input,
             cursor,
-        }))
+        })
     })
 }
 
