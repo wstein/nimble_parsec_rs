@@ -1,5 +1,5 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{duplicate, eventually, integer_min, string, Value};
-use num_bigint::BigInt;
 
 #[test]
 fn duplicate_parses_combinator_n_times() {
@@ -36,7 +36,7 @@ fn eventually_skips_until_inner_matches() {
     let ok = eventually(integer_min(1))
         .parse("abc12!")
         .expect("should eventually find an integer");
-    assert_eq!(ok.tokens, vec![Value::Int(BigInt::from(12))]);
+    assert_eq!(ok.tokens, vec![Value::Int(Integer::from(12))]);
     assert_eq!(ok.rest, "!");
     assert_eq!(ok.cursor.byte_offset, 5);
 }

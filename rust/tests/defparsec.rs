@@ -1,8 +1,8 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     choice, concat, defcombinator, defcombinatorp, defparsec, defparsecp, ignore, integer_exact,
     integer_min, string, Value,
 };
-use num_bigint::BigInt;
 
 // ---------------------------------------------------------------------------
 // defparsec! — generates a public parse function with codegen
@@ -25,9 +25,9 @@ fn defparsec_codegen_parse_succeeds() {
     assert_eq!(ok.rest, " rest");
     assert_eq!(ok.cursor.byte_offset, 10);
     assert_eq!(ok.tokens.len(), 3);
-    assert_eq!(ok.tokens[0], Value::Int(BigInt::from(2024u32)));
-    assert_eq!(ok.tokens[1], Value::Int(BigInt::from(3u32)));
-    assert_eq!(ok.tokens[2], Value::Int(BigInt::from(15u32)));
+    assert_eq!(ok.tokens[0], Value::Int(Integer::from(2024u32)));
+    assert_eq!(ok.tokens[1], Value::Int(Integer::from(3u32)));
+    assert_eq!(ok.tokens[2], Value::Int(Integer::from(15u32)));
 }
 
 #[test]
@@ -45,7 +45,7 @@ defparsec!(parse_number, integer_min(1));
 fn defparsec_runtime_fallback_parses() {
     let ok = parse_number("42abc").expect("number parse");
     assert_eq!(ok.rest, "abc");
-    assert_eq!(ok.tokens, vec![Value::Int(BigInt::from(42u32))]);
+    assert_eq!(ok.tokens, vec![Value::Int(Integer::from(42u32))]);
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +72,8 @@ fn defcombinator_returns_reusable_parser() {
     let p = two_digit_int();
     let ok1 = p.parse("12rest").expect("first parse");
     let ok2 = p.parse("99end").expect("second parse");
-    assert_eq!(ok1.tokens, vec![Value::Int(BigInt::from(12u32))]);
-    assert_eq!(ok2.tokens, vec![Value::Int(BigInt::from(99u32))]);
+    assert_eq!(ok1.tokens, vec![Value::Int(Integer::from(12u32))]);
+    assert_eq!(ok2.tokens, vec![Value::Int(Integer::from(99u32))]);
 }
 
 #[test]

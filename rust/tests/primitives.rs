@@ -1,7 +1,7 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_string, bytes, concat, eos, integer_min, string, tag, AsciiPredicate, Value,
 };
-use num_bigint::BigInt;
 
 #[test]
 fn string_and_tag_accept_runtime_strings() {
@@ -16,7 +16,7 @@ fn string_and_tag_accept_runtime_strings() {
         tagged.parse("42").expect("parses").tokens,
         vec![Value::Tagged(
             "dynamic".to_string(),
-            vec![Value::Int(BigInt::from(42))]
+            vec![Value::Int(Integer::from(42))]
         )]
     );
 }

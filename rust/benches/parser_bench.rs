@@ -1,8 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use nimble_parsec_rs::{
-    ascii_char, compile_parser, concat, ignore, integer_exact, AsciiPredicate, Value,
+    ascii_char, compile_parser, concat, ignore, integer_exact, AsciiPredicate, Integer, Value,
 };
-use num_bigint::BigInt;
 
 fn build_runtime_parser() -> nimble_parsec_rs::Parser {
     let date = concat(
@@ -90,13 +89,15 @@ fn handwritten_datetime(input: &str) -> Option<usize> {
 /// Like [`handwritten_datetime`], but produces the same `Vec<Value>` tokens as
 /// the combinator parser. This is the *fair* codegen ceiling: a specializer
 /// must emit identical tokens, so the gap between this and the interpreter is
-/// the dispatch overhead codegen could remove (token allocation is unavoidable
-/// either way).
+/// the dispatch overhead codegen could remove. Parses via `i64` so the tokens
+/// take the same inline small-integer path the combinators now use.
 fn handwritten_datetime_tokens(input: &str) -> Option<Vec<Value>> {
     let b = input.as_bytes();
     handwritten_datetime(input)?;
     let int = |s: &[u8]| -> Value {
-        Value::Int(std::str::from_utf8(s).unwrap().parse::<BigInt>().unwrap())
+        Value::Int(Integer::from(
+            std::str::from_utf8(s).unwrap().parse::<i64>().unwrap(),
+        ))
     };
     Some(vec![
         int(&b[0..4]),

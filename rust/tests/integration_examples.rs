@@ -1,11 +1,11 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_char, concat, ignore, integer_exact, integer_min, optional, reduce, string, tag,
     utf8_string, AsciiPredicate, Cursor, Value,
 };
-use num_bigint::BigInt;
 
 fn int(n: i64) -> Value {
-    Value::Int(BigInt::from(n))
+    Value::Int(Integer::from(n))
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn signed_int_with_optional_sign_and_tag() {
     let core = concat(sign, integer_min(1));
 
     let reduced = reduce(core, |tokens| match tokens.as_slice() {
-        [Value::Int(sign), Value::Int(v)] if *sign == BigInt::from(b'-') => Value::Int(-v),
+        [Value::Int(sign), Value::Int(v)] if *sign == Integer::from(b'-') => Value::Int(-v),
         [Value::Int(v)] => Value::Int(v.clone()),
         _ => unreachable!("signed_int parser yields one or two integer tokens"),
     });

@@ -1,8 +1,8 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{concat, ignore, integer_min, post_traverse, pre_traverse, string, Value};
-use num_bigint::BigInt;
 
 fn int(n: i64) -> Value {
-    Value::Int(BigInt::from(n))
+    Value::Int(Integer::from(n))
 }
 
 #[test]

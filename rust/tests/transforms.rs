@@ -1,11 +1,11 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_char, concat, ignore, integer_min, map, post_traverse, reduce, replace, string,
     unwrap_and_tag, wrap, AsciiPredicate, Value,
 };
-use num_bigint::BigInt;
 
 fn int(n: i64) -> Value {
-    Value::Int(BigInt::from(n))
+    Value::Int(Integer::from(n))
 }
 
 // `ignore` suppresses inner token allocation, but token-dependent observable
@@ -45,7 +45,7 @@ fn map_transforms_each_token_individually() {
         ascii_char(vec![AsciiPredicate::Any]),
     );
     let parser = map(two, |v| match v {
-        Value::Int(n) => Value::Int(n + BigInt::from(1)),
+        Value::Int(n) => Value::Int(n + Integer::from(1)),
         other => other,
     });
 
@@ -53,7 +53,7 @@ fn map_transforms_each_token_individually() {
     // 'a' (97) and 'b' (98) each incremented.
     assert_eq!(
         ok.tokens,
-        vec![Value::Int(BigInt::from(98)), Value::Int(BigInt::from(99))]
+        vec![Value::Int(Integer::from(98)), Value::Int(Integer::from(99))]
     );
 }
 
@@ -61,7 +61,7 @@ fn map_transforms_each_token_individually() {
 fn reduce_collapses_tokens_into_one() {
     let pair = concat(integer_min(1), concat(ignore(string(",")), integer_min(1)));
     let parser = reduce(pair, |tokens| {
-        let sum: BigInt = tokens
+        let sum: Integer = tokens
             .into_iter()
             .filter_map(|t| match t {
                 Value::Int(n) => Some(n),

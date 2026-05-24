@@ -1,10 +1,10 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_char, choice, concat, optional, repeat, string, AsciiPredicate, Value,
 };
-use num_bigint::BigInt;
 
 fn ch(c: char) -> Value {
-    Value::Int(BigInt::from(c as u32))
+    Value::Int(Integer::from(c as u32))
 }
 
 #[test]

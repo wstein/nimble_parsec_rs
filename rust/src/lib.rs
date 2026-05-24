@@ -8,20 +8,20 @@
 //! remaining input, [`Cursor`], and threaded [`Context`]) or a [`ParseFailure`].
 //!
 //! ```
-//! use nimble_parsec_rs::{ascii_char, integer_min, AsciiPredicate, BigInt, Value};
+//! use nimble_parsec_rs::{ascii_char, integer_min, AsciiPredicate, Integer, Value};
 //!
 //! // A lowercase letter followed by an integer.
 //! let parser = ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')]).then(integer_min(1));
 //! let ok = parser.parse("a42").expect("parses");
 //!
-//! // `ascii_char` emits the matched byte as a codepoint; `integer` emits a bigint.
-//! assert_eq!(ok.tokens, vec![Value::Int(BigInt::from(b'a')), Value::Int(BigInt::from(42))]);
+//! // `ascii_char` emits the matched byte as a codepoint; `integer` emits an Integer.
+//! assert_eq!(ok.tokens, vec![Value::Int(Integer::from(b'a')), Value::Int(Integer::from(42))]);
 //! assert_eq!(ok.rest, "");
 //! ```
 #![deny(missing_docs)]
 
 use std::collections::HashMap;
-use std::ops::RangeInclusive;
+use std::ops::{Add, Neg, RangeInclusive};
 use std::sync::{Arc, OnceLock};
 
 pub use num_bigint::BigInt;
@@ -54,14 +54,139 @@ impl Default for Cursor {
     }
 }
 
+/// An arbitrary-precision integer with a small-value fast path: values that fit
+/// in `i64` are stored inline (no heap allocation), larger ones use [`BigInt`].
+/// The big representation is only ever used for out-of-`i64`-range values, so
+/// equality and hashing are exact. Construct via `From`/`Integer::from`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Integer(IntegerRepr);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum IntegerRepr {
+    Small(i64),
+    Big(BigInt),
+}
+
+impl Integer {
+    /// Parses a non-empty run of ASCII digits, using the inline path when the
+    /// value fits in `i64`.
+    fn from_digits(s: &str) -> Integer {
+        match s.parse::<i64>() {
+            Ok(n) => Integer(IntegerRepr::Small(n)),
+            Err(_) => Integer(IntegerRepr::Big(
+                s.parse::<BigInt>().expect("digit run is a valid integer"),
+            )),
+        }
+    }
+
+    fn to_bigint(&self) -> BigInt {
+        match &self.0 {
+            IntegerRepr::Small(n) => BigInt::from(*n),
+            IntegerRepr::Big(b) => b.clone(),
+        }
+    }
+}
+
+impl From<BigInt> for Integer {
+    fn from(b: BigInt) -> Self {
+        match i64::try_from(&b) {
+            Ok(n) => Integer(IntegerRepr::Small(n)),
+            Err(_) => Integer(IntegerRepr::Big(b)),
+        }
+    }
+}
+
+macro_rules! integer_from_primitive {
+    ($($t:ty),*) => {$(
+        impl From<$t> for Integer {
+            fn from(n: $t) -> Self {
+                Integer(IntegerRepr::Small(i64::from(n)))
+            }
+        }
+    )*};
+}
+integer_from_primitive!(i8, u8, i16, u16, i32, u32, i64);
+
+impl From<usize> for Integer {
+    fn from(n: usize) -> Self {
+        match i64::try_from(n) {
+            Ok(v) => Integer(IntegerRepr::Small(v)),
+            Err(_) => Integer(IntegerRepr::Big(BigInt::from(n))),
+        }
+    }
+}
+
+impl std::fmt::Display for Integer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            IntegerRepr::Small(n) => write!(f, "{n}"),
+            IntegerRepr::Big(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+impl Neg for &Integer {
+    type Output = Integer;
+    fn neg(self) -> Integer {
+        match &self.0 {
+            IntegerRepr::Small(n) => match n.checked_neg() {
+                Some(m) => Integer(IntegerRepr::Small(m)),
+                None => Integer::from(-BigInt::from(*n)),
+            },
+            IntegerRepr::Big(b) => Integer::from(-b.clone()),
+        }
+    }
+}
+
+impl Neg for Integer {
+    type Output = Integer;
+    fn neg(self) -> Integer {
+        -&self
+    }
+}
+
+impl Add for Integer {
+    type Output = Integer;
+    fn add(self, rhs: Integer) -> Integer {
+        if let (IntegerRepr::Small(a), IntegerRepr::Small(b)) = (&self.0, &rhs.0) {
+            if let Some(s) = a.checked_add(*b) {
+                return Integer(IntegerRepr::Small(s));
+            }
+        }
+        Integer::from(self.to_bigint() + rhs.to_bigint())
+    }
+}
+
+impl std::iter::Sum for Integer {
+    fn sum<I: Iterator<Item = Integer>>(iter: I) -> Integer {
+        iter.fold(Integer::from(0i64), |acc, x| acc + x)
+    }
+}
+
+impl Ord for Integer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (&self.0, &other.0) {
+            (IntegerRepr::Small(a), IntegerRepr::Small(b)) => a.cmp(b),
+            _ => self.to_bigint().cmp(&other.to_bigint()),
+        }
+    }
+}
+
+impl PartialOrd for Integer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// A parsed result token. Mirrors the terms NimbleParsec emits.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
-    /// An arbitrary-precision integer, mirroring NimbleParsec's BEAM integers,
-    /// which are unbounded. Produced by the `integer` and `ascii_char`
-    /// combinators (the latter emits the matched byte as its codepoint).
-    Int(BigInt),
+    /// An [`Integer`] (arbitrary precision with a small-value fast path),
+    /// mirroring NimbleParsec's unbounded BEAM integers. Produced by the
+    /// `integer` and `ascii_char` combinators (the latter emits the matched
+    /// byte as its codepoint).
+    Int(Integer),
     /// A UTF-8 string, produced by `string`, `utf8_string`, `ascii_string`,
     /// and `bytes`.
     Str(String),
@@ -821,8 +946,14 @@ pub fn debug(parser: Parser) -> Parser {
 /// not call these directly.
 #[doc(hidden)]
 pub mod __private {
-    use super::{advance, Ast, Context, Cursor, ParseResult, Parser};
+    use super::{advance, Ast, Context, Cursor, Integer, ParseResult, Parser};
     use std::sync::Arc;
+
+    /// Parses a non-empty run of ASCII digits into an [`Integer`] (small-value
+    /// fast path), for generated `integer_*` code.
+    pub fn parse_integer(digits: &str) -> Integer {
+        Integer::from_digits(digits)
+    }
 
     /// Wraps a raw function as a `Parser` so generated specialized parsers fit
     /// the standard `Parser` type.
@@ -904,7 +1035,7 @@ fn run_ast<'a>(
             let consumed = &input[..1];
             Ok(ParseSuccess {
                 tokens: if emit {
-                    vec![Value::Int(BigInt::from(b))]
+                    vec![Value::Int(Integer::from(b))]
                 } else {
                     Vec::new()
                 },
@@ -932,7 +1063,7 @@ fn run_ast<'a>(
             let consumed = &input[..ch.len_utf8()];
             Ok(ParseSuccess {
                 tokens: if emit {
-                    vec![Value::Int(BigInt::from(ch as u32))]
+                    vec![Value::Int(Integer::from(ch as u32))]
                 } else {
                     Vec::new()
                 },
@@ -1081,10 +1212,7 @@ fn run_ast<'a>(
             }
             let consumed = &input[..i];
             let tokens = if emit {
-                let value = consumed
-                    .parse::<BigInt>()
-                    .expect("digit run is a valid integer");
-                vec![Value::Int(value)]
+                vec![Value::Int(Integer::from_digits(consumed))]
             } else {
                 Vec::new()
             };
@@ -1328,7 +1456,7 @@ fn run_ast<'a>(
             let ok = run_ast(inner, input, cursor, context, true)?;
             let token = Value::List(vec![
                 Value::List(ok.tokens),
-                Value::Int(BigInt::from(ok.cursor.byte_offset)),
+                Value::Int(Integer::from(ok.cursor.byte_offset)),
             ]);
             Ok(ParseSuccess {
                 tokens: vec![token],
@@ -1341,8 +1469,8 @@ fn run_ast<'a>(
         Ast::Line(inner) => {
             let ok = run_ast(inner, input, cursor, context, true)?;
             let position = Value::List(vec![
-                Value::Int(BigInt::from(ok.cursor.line)),
-                Value::Int(BigInt::from(ok.cursor.line_start_offset)),
+                Value::Int(Integer::from(ok.cursor.line)),
+                Value::Int(Integer::from(ok.cursor.line_start_offset)),
             ]);
             let token = Value::List(vec![Value::List(ok.tokens), position]);
             Ok(ParseSuccess {

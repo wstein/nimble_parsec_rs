@@ -238,7 +238,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     }
                     let __consumed = &__input[..__n];
                     __tokens.push(::nimble_parsec_rs::Value::Int(
-                        __consumed.parse::<::nimble_parsec_rs::BigInt>().expect("digit run is valid"),
+                        ::nimble_parsec_rs::__private::parse_integer(__consumed),
                     ));
                     __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
                     __input = &__input[__n..];
@@ -280,7 +280,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     }
                     let __consumed = &__input[..__i];
                     __tokens.push(::nimble_parsec_rs::Value::Int(
-                        __consumed.parse::<::nimble_parsec_rs::BigInt>().expect("digit run is valid"),
+                        ::nimble_parsec_rs::__private::parse_integer(__consumed),
                     ));
                     __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
                     __input = &__input[__i..];

@@ -1,7 +1,7 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_char, concat, ignore, integer_min, string, tag, AsciiPredicate, Value,
 };
-use num_bigint::BigInt;
 
 fn letter() -> nimble_parsec_rs::Parser {
     ascii_char(vec![AsciiPredicate::Range(b'a'..=b'z')])
@@ -40,7 +40,7 @@ fn fluent_or_optional_repeated_ignored() {
 fn fluent_reduce_and_replace() {
     let summed =
         concat(integer_min(1), concat(ignore(string(",")), integer_min(1))).reduce(|tokens| {
-            let total: BigInt = tokens
+            let total: Integer = tokens
                 .into_iter()
                 .filter_map(|t| match t {
                     Value::Int(n) => Some(n),

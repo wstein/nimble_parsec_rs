@@ -1,8 +1,8 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{utf8_char, utf8_string, Utf8Predicate, Value};
-use num_bigint::BigInt;
 
 fn cp(c: char) -> Value {
-    Value::Int(BigInt::from(c as u32))
+    Value::Int(Integer::from(c as u32))
 }
 
 #[test]

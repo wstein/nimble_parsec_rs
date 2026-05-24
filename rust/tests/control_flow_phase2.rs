@@ -1,8 +1,8 @@
+use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     ascii_char, concat, integer_min, lookahead, lookahead_not, optional, post_traverse,
     repeat_while, string, times, AsciiPredicate, RepeatWhileControl, TimesOptions, Value,
 };
-use num_bigint::BigInt;
 
 #[test]
 fn repeat_while_predicate_reads_threaded_context() {
@@ -13,16 +13,16 @@ fn repeat_while_predicate_reads_threaded_context() {
         |tokens, mut ctx, _| {
             let n = match ctx.get("count") {
                 Some(Value::Int(n)) => n.clone(),
-                _ => BigInt::from(0),
+                _ => Integer::from(0),
             };
-            ctx.insert("count".to_string(), Value::Int(n + 1));
+            ctx.insert("count".to_string(), Value::Int(n + Integer::from(1)));
             Ok((tokens, ctx))
         },
     );
     let parser = repeat_while(
         inner,
         |_, _, ctx| match ctx.get("count") {
-            Some(Value::Int(n)) if *n >= BigInt::from(2) => RepeatWhileControl::Halt,
+            Some(Value::Int(n)) if *n >= Integer::from(2) => RepeatWhileControl::Halt,
             _ => RepeatWhileControl::Cont,
         },
         0,
@@ -34,7 +34,7 @@ fn repeat_while_predicate_reads_threaded_context() {
 }
 
 fn ch(c: char) -> Value {
-    Value::Int(BigInt::from(c as u32))
+    Value::Int(Integer::from(c as u32))
 }
 
 #[test]

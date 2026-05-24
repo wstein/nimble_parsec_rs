@@ -103,21 +103,23 @@ named parsers, which belong with codegen.
 
 | Variant | Time | Notes |
 | --- | --- | --- |
-| Interpreter (combinators) | ~1.16 µs | `Parser::parse` walking the `Ast` (after `ignore` token-suppression) |
-| **Specialized `compile_parser!`** | **~0.56 µs** | generated inline code (`Ast::Native`), emits identical tokens |
-| Hand-written, same tokens | ~0.43 µs | the *fair* codegen ceiling (still allocates the 6 `BigInt`s + `Vec`) |
+| Interpreter (combinators) | ~0.81 µs | `Parser::parse` walking the `Ast` |
+| **Specialized `compile_parser!`** | **~0.14 µs** | generated inline code (`Ast::Native`), emits identical tokens |
+| Hand-written, same tokens | ~0.07 µs | the *fair* codegen ceiling (still allocates the result `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
 
 Codegen specialization is **implemented for the recognizable subset** (`string`,
 `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `empty`, `eos`);
 broader combinator coverage (e.g. `ascii_char`, which needs compile-time
-predicate parsing and matching failure-message generation) is future work. A specializer must emit **identical
-tokens**, so its ceiling is the third row, not the bottom — and the generated
-code already lands at ~0.56 µs, about **2.5× faster than the interpreter** and
-within ~30% of that fair ceiling. The remaining gap is dominated by the
-unavoidable token allocations (6 `BigInt`s + a `Vec`); `ignore`d
-sub-combinators no longer allocate throwaway tokens in either the generated
-path or the interpreter — the interpreter threads an `emit` flag so leaves
-under `ignore` skip building tokens, worth ~16% on this grammar (1.38 → 1.16
-µs). A further win would be a small-integer token representation to avoid the
-`BigInt` heap allocations entirely.
+predicate parsing and matching failure-message generation) is future work. A
+specializer must emit **identical tokens**, so its ceiling is the third row,
+not the bottom — and the generated code lands at ~0.14 µs, about **6× faster
+than the interpreter** and within ~2× of that fair ceiling.
+
+Two earlier optimizations are folded in: `ignore`d sub-combinators allocate no
+throwaway tokens (the interpreter threads an `emit` flag so leaves under
+`ignore` skip building tokens), and `Value::Int` now uses the small-integer
+[`Integer`] representation, so in-range integers no longer heap-allocate a
+`BigInt` — this alone took the interpreter from ~1.16 to ~0.81 µs and the
+specialized path from ~0.56 to ~0.14 µs. The remaining interpreter overhead is
+the per-combinator result `Vec`s and context clones, not integer allocation.
