@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::punctuated::Punctuated;
 use syn::{parse_macro_input, Expr, Ident, Token};
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ impl syn::parse::Parse for NamedParser {
 
 /// Validates a parser-building expression at compile time.  When the
 /// expression uses only statically-recognizable combinators (`string`,
-/// `integer_exact`, `integer_min`, `ignore`, `concat`, `empty`, `eos`),
+/// `integer_exact`, `integer_min`, `ignore`, `concat`, `choice`, `empty`, `eos`),
 /// emits specialized Rust that avoids intermediate token allocations.
 /// Otherwise falls back to the unchanged runtime expression.
 #[proc_macro]
@@ -297,8 +298,86 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             Some(quote! { #left #right })
         }
 
+        // -- choice -------------------------------------------------------
+        // Only when the argument is a `vec![..]` literal and every branch is
+        // itself codegen-able; otherwise fall back to runtime. Each branch runs
+        // in its own closure so its `return Err` backtracks to the next branch
+        // instead of failing the whole parse, matching the interpreter (first
+        // success wins; on total failure, branch reasons are joined with " or ").
+        "choice" if args.len() == 1 => {
+            let branches = vec_elements(&args[0])?;
+            if branches.len() < 2 {
+                return None;
+            }
+            let mut attempts = Vec::new();
+            for branch in &branches {
+                let body = codegen_impl(branch, ignored)?;
+                attempts.push(quote! {
+                    if !__choice_done {
+                        let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                            let mut __input = __choice_input;
+                            let mut __cursor = __choice_cursor;
+                            let mut __context = __choice_ctx.clone();
+                            let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                                ::std::vec::Vec::new();
+                            #body
+                            Ok(::nimble_parsec_rs::ParseSuccess {
+                                tokens: __tokens,
+                                rest: __input,
+                                cursor: __cursor,
+                                context: __context,
+                            })
+                        })();
+                        match __r {
+                            Ok(__ok) => {
+                                __tokens.extend(__ok.tokens);
+                                __input = __ok.rest;
+                                __cursor = __ok.cursor;
+                                __context = __ok.context;
+                                __choice_done = true;
+                            }
+                            Err(__e) => __choice_reasons.push(__e.reason),
+                        }
+                    }
+                });
+            }
+            Some(quote! {{
+                let __choice_input = __input;
+                let __choice_cursor = __cursor;
+                let __choice_ctx = __context.clone();
+                let mut __choice_reasons: ::std::vec::Vec<::std::string::String> =
+                    ::std::vec::Vec::new();
+                let mut __choice_done = false;
+                #(#attempts)*
+                if !__choice_done {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: __choice_reasons.join(" or "),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+            }})
+        }
+
         _ => None,
     }
+}
+
+/// Extracts the element expressions from a `vec![..]` literal, or `None` if the
+/// expression is not a `vec!` literal (e.g. a variable), which forces runtime
+/// fallback.
+fn vec_elements(expr: &Expr) -> Option<Vec<Expr>> {
+    let Expr::Macro(m) = expr else {
+        return None;
+    };
+    if !m.mac.path.is_ident("vec") {
+        return None;
+    }
+    let parsed = m
+        .mac
+        .parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        .ok()?;
+    Some(parsed.into_iter().collect())
 }
 
 /// Extracts `(last_path_segment_name, args)` from a function-call expression.

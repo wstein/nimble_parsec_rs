@@ -1,6 +1,6 @@
 use nimble_parsec_rs::{
-    concat, defcombinator, defcombinatorp, defparsec, defparsecp, ignore, integer_exact, string,
-    Value,
+    choice, concat, defcombinator, defcombinatorp, defparsec, defparsecp, ignore, integer_exact,
+    integer_min, string, Value,
 };
 use num_bigint::BigInt;
 
@@ -117,4 +117,51 @@ fn compile_parser_codegen_matches_runtime() {
     assert_eq!(c.tokens, r.tokens);
     assert_eq!(c.rest, r.rest);
     assert_eq!(c.cursor.byte_offset, r.cursor.byte_offset);
+}
+
+// ---------------------------------------------------------------------------
+// choice codegen
+// ---------------------------------------------------------------------------
+
+defparsec!(
+    parse_keyword,
+    choice(vec![string("foo"), string("bar"), string("baz")])
+);
+
+#[test]
+fn defparsec_choice_codegen() {
+    assert_eq!(parse_keyword("bar!").expect("parses").rest, "!");
+    assert_eq!(
+        parse_keyword("foo").expect("parses").tokens,
+        vec![Value::Str("foo".to_string())]
+    );
+    let err = parse_keyword("qux").expect_err("no branch matches");
+    assert!(
+        err.reason.contains("foo") && err.reason.contains("baz") && err.reason.contains(" or ")
+    );
+}
+
+#[test]
+fn compile_parser_choice_matches_runtime() {
+    use nimble_parsec_rs::compile_parser;
+
+    let compiled = compile_parser!(concat(
+        choice(vec![string("foo"), string("bar")]),
+        integer_min(1)
+    ));
+    let runtime = concat(choice(vec![string("foo"), string("bar")]), integer_min(1));
+
+    for input in ["foo12!", "bar7", "xyz", "foo"] {
+        match (compiled.parse(input), runtime.parse(input)) {
+            (Ok(c), Ok(r)) => {
+                assert_eq!(c.tokens, r.tokens, "tokens differ for {input:?}");
+                assert_eq!(c.rest, r.rest, "rest differs for {input:?}");
+            }
+            (Err(c), Err(r)) => {
+                assert_eq!(c.reason, r.reason, "reason differs for {input:?}");
+                assert_eq!(c.rest, r.rest, "error rest differs for {input:?}");
+            }
+            _ => panic!("codegen and runtime disagree on success/failure for {input:?}"),
+        }
+    }
 }
