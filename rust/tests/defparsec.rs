@@ -533,3 +533,53 @@ fn compile_parser_integer_range_matches_runtime() {
         &["7", "12345", "x", ""],
     );
 }
+
+// ---------------------------------------------------------------------------
+// string-run codegen parity: ascii_string, utf8_string
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_ascii_string_matches_runtime() {
+    use nimble_parsec_rs::{ascii_string, compile_parser, AsciiPredicate};
+
+    let lower = compile_parser!(ascii_string(
+        vec![AsciiPredicate::Range(b'a'..=b'z')],
+        1,
+        Some(3)
+    ));
+    assert_specialized(&lower);
+    assert_parity(
+        &lower,
+        &ascii_string(vec![AsciiPredicate::Range(b'a'..=b'z')], 1, Some(3)),
+        // run of 0 (min not met), exactly min, over max (capped), non-ASCII stop.
+        &["", "abc", "abcdef", "ABC", "abé"],
+    );
+
+    // Empty predicate set accepts any ASCII byte and must still specialize.
+    let any = compile_parser!(ascii_string(vec![], 0, None));
+    assert_specialized(&any);
+    assert_parity(&any, &ascii_string(vec![], 0, None), &["abc123", "", "é"]);
+}
+
+#[test]
+fn compile_parser_utf8_string_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, utf8_string, Utf8Predicate};
+
+    let lower = compile_parser!(utf8_string(
+        vec![Utf8Predicate::Range('a'..='z')],
+        2,
+        Some(4)
+    ));
+    assert_specialized(&lower);
+    assert_parity(
+        &lower,
+        &utf8_string(vec![Utf8Predicate::Range('a'..='z')], 2, Some(4)),
+        // below min, exactly min, capped at max, multi-byte codepoint stop.
+        &["a", "ab", "abcdef", "abé", ""],
+    );
+
+    // Empty predicate set accepts any codepoint and must still specialize.
+    let any = compile_parser!(utf8_string(vec![], 0, None));
+    assert_specialized(&any);
+    assert_parity(&any, &utf8_string(vec![], 0, None), &["héllo", "", "abc"]);
+}

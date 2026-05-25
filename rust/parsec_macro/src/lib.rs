@@ -432,6 +432,88 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             }})
         }
 
+        // -- ascii_string -------------------------------------------------
+        "ascii_string" if args.len() == 3 => {
+            let preds = vec_elements(&args[0])?;
+            let cond = char_class_condition(&preds, &quote!(__b))?;
+            let min = &args[1];
+            let max = &args[2];
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Str(__consumed.to_string()));
+                }
+            };
+            Some(quote! {{
+                let __min: usize = #min;
+                let __max_opt: ::std::option::Option<usize> = #max;
+                let __raw = __input.as_bytes();
+                let mut __taken = 0usize;
+                let mut __i = 0usize;
+                while __i < __raw.len() {
+                    if let ::std::option::Option::Some(__max) = __max_opt {
+                        if __taken >= __max { break; }
+                    }
+                    let __b = __raw[__i];
+                    if __b > 0x7f || !(#cond) { break; }
+                    __i += 1;
+                    __taken += 1;
+                }
+                if __taken < __min {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "expected ascii string with minimum length".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+                let __consumed = &__input[..__i];
+                #push
+                __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                __input = &__input[__i..];
+            }})
+        }
+
+        // -- utf8_string --------------------------------------------------
+        "utf8_string" if args.len() == 3 => {
+            let preds = vec_elements(&args[0])?;
+            let cond = char_class_condition(&preds, &quote!(__c))?;
+            let min = &args[1];
+            let max = &args[2];
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Str(__consumed.to_string()));
+                }
+            };
+            Some(quote! {{
+                let __min: usize = #min;
+                let __max_opt: ::std::option::Option<usize> = #max;
+                let mut __consumed_end = 0usize;
+                let mut __taken = 0usize;
+                for (__idx, __c) in __input.char_indices() {
+                    if let ::std::option::Option::Some(__max) = __max_opt {
+                        if __taken >= __max { break; }
+                    }
+                    if !(#cond) { break; }
+                    __consumed_end = __idx + __c.len_utf8();
+                    __taken += 1;
+                }
+                if __taken < __min {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "expected utf8 string with minimum length".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+                let __consumed = &__input[..__consumed_end];
+                #push
+                __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                __input = &__input[__consumed_end..];
+            }})
+        }
+
         // -- choice -------------------------------------------------------
         // Only when the argument is a `vec![..]` literal and every branch is
         // itself codegen-able; otherwise fall back to runtime. Each branch runs
