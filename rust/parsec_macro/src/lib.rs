@@ -1044,10 +1044,10 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let __lbl_input = __input;
                 let __lbl_cursor = __cursor;
                 let __lbl_ctx = __context.clone();
-                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                let __r: ::nimble_parsec_rs::ParseResult = (move || {
                     let mut __input = __lbl_input;
                     let mut __cursor = __lbl_cursor;
-                    let mut __context = __lbl_ctx.clone();
+                    let mut __context = __lbl_ctx;
                     let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
                         ::std::vec::Vec::new();
                     #inner
@@ -1086,10 +1086,10 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let __la_input = __input;
                 let __la_cursor = __cursor;
                 let __la_ctx = __context.clone();
-                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                let __r: ::nimble_parsec_rs::ParseResult = (move || {
                     let mut __input = __la_input;
                     let mut __cursor = __la_cursor;
-                    let mut __context = __la_ctx.clone();
+                    let mut __context = __la_ctx;
                     let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
                         ::std::vec::Vec::new();
                     #inner
@@ -1115,10 +1115,10 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let __la_input = __input;
                 let __la_cursor = __cursor;
                 let __la_ctx = __context.clone();
-                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                let __r: ::nimble_parsec_rs::ParseResult = (move || {
                     let mut __input = __la_input;
                     let mut __cursor = __la_cursor;
-                    let mut __context = __la_ctx.clone();
+                    let mut __context = __la_ctx;
                     let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
                         ::std::vec::Vec::new();
                     #inner
@@ -1150,10 +1150,10 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let __dbg_input = __input;
                 let __dbg_cursor = __cursor;
                 let __dbg_ctx = __context.clone();
-                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                let __r: ::nimble_parsec_rs::ParseResult = (move || {
                     let mut __input = __dbg_input;
                     let mut __cursor = __dbg_cursor;
-                    let mut __context = __dbg_ctx.clone();
+                    let mut __context = __dbg_ctx;
                     let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
                         ::std::vec::Vec::new();
                     #inner
