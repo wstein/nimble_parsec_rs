@@ -1033,6 +1033,157 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             }})
         }
 
+        // -- label --------------------------------------------------------
+        // Runs the inner in a closure so its `return Err` is caught and the
+        // reason rewritten to `expected <label>`, preserving the inner error's
+        // position. Success passes through unchanged.
+        "label" if args.len() == 2 => {
+            let inner = codegen_impl(&args[0], ignored)?;
+            let label = &args[1];
+            Some(quote! {{
+                let __lbl_input = __input;
+                let __lbl_cursor = __cursor;
+                let __lbl_ctx = __context.clone();
+                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                    let mut __input = __lbl_input;
+                    let mut __cursor = __lbl_cursor;
+                    let mut __context = __lbl_ctx.clone();
+                    let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        ::std::vec::Vec::new();
+                    #inner
+                    Ok(::nimble_parsec_rs::ParseSuccess {
+                        tokens: __tokens,
+                        rest: __input,
+                        cursor: __cursor,
+                        context: __context,
+                    })
+                })();
+                match __r {
+                    Ok(__ok) => {
+                        __tokens.extend(__ok.tokens);
+                        __input = __ok.rest;
+                        __cursor = __ok.cursor;
+                        __context = __ok.context;
+                    }
+                    Err(__e) => {
+                        let __lbl: ::std::sync::Arc<str> = (#label).into();
+                        return Err(::nimble_parsec_rs::ParseFailure {
+                            reason: ::std::format!("expected {}", __lbl),
+                            rest: __e.rest,
+                            cursor: __e.cursor,
+                        });
+                    }
+                }
+            }})
+        }
+
+        // -- lookahead ----------------------------------------------------
+        // Zero-width: run the inner (tokens suppressed) in a closure; on success
+        // consume/emit nothing; on failure propagate the inner error verbatim.
+        "lookahead" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], true)?;
+            Some(quote! {{
+                let __la_input = __input;
+                let __la_cursor = __cursor;
+                let __la_ctx = __context.clone();
+                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                    let mut __input = __la_input;
+                    let mut __cursor = __la_cursor;
+                    let mut __context = __la_ctx.clone();
+                    let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        ::std::vec::Vec::new();
+                    #inner
+                    Ok(::nimble_parsec_rs::ParseSuccess {
+                        tokens: __tokens,
+                        rest: __input,
+                        cursor: __cursor,
+                        context: __context,
+                    })
+                })();
+                // Propagate the inner failure verbatim; the Ok value (the peeked
+                // parse) is discarded since the assertion consumes nothing.
+                __r?;
+            }})
+        }
+
+        // -- lookahead_not ------------------------------------------------
+        // Zero-width negative: run the inner in a closure; if it matches, fail at
+        // the original position; otherwise succeed consuming/emitting nothing.
+        "lookahead_not" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], true)?;
+            Some(quote! {{
+                let __la_input = __input;
+                let __la_cursor = __cursor;
+                let __la_ctx = __context.clone();
+                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                    let mut __input = __la_input;
+                    let mut __cursor = __la_cursor;
+                    let mut __context = __la_ctx.clone();
+                    let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        ::std::vec::Vec::new();
+                    #inner
+                    Ok(::nimble_parsec_rs::ParseSuccess {
+                        tokens: __tokens,
+                        rest: __input,
+                        cursor: __cursor,
+                        context: __context,
+                    })
+                })();
+                if __r.is_ok() {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "did not expect lookahead parser to match".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+            }})
+        }
+
+        // -- debug --------------------------------------------------------
+        // Prints the parser state to stderr around the inner (matching the
+        // interpreter's format), then passes the result through. The closure lets
+        // us print on the error path before propagating.
+        "debug" if args.len() == 1 => {
+            let inner = codegen_impl(&args[0], ignored)?;
+            Some(quote! {{
+                ::std::eprintln!("debug: parsing {:?} at {:?}", __input, __cursor);
+                let __dbg_input = __input;
+                let __dbg_cursor = __cursor;
+                let __dbg_ctx = __context.clone();
+                let __r: ::nimble_parsec_rs::ParseResult = (|| {
+                    let mut __input = __dbg_input;
+                    let mut __cursor = __dbg_cursor;
+                    let mut __context = __dbg_ctx.clone();
+                    let mut __tokens: ::std::vec::Vec<::nimble_parsec_rs::Value> =
+                        ::std::vec::Vec::new();
+                    #inner
+                    Ok(::nimble_parsec_rs::ParseSuccess {
+                        tokens: __tokens,
+                        rest: __input,
+                        cursor: __cursor,
+                        context: __context,
+                    })
+                })();
+                match __r {
+                    Ok(__ok) => {
+                        ::std::eprintln!(
+                            "debug: ok tokens={:?} rest={:?}",
+                            __ok.tokens,
+                            __ok.rest
+                        );
+                        __tokens.extend(__ok.tokens);
+                        __input = __ok.rest;
+                        __cursor = __ok.cursor;
+                        __context = __ok.context;
+                    }
+                    Err(__e) => {
+                        ::std::eprintln!("debug: error {:?}", __e.reason);
+                        return Err(__e);
+                    }
+                }
+            }})
+        }
+
         _ => None,
     }
 }

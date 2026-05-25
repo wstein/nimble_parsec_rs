@@ -71,7 +71,7 @@ Status legend:
 | `quoted_repeat_while` | — | ❌ | Compile-time `repeat_while` variant. |
 | `parsec` | `ParserRef` / `recursive` | ✅ | Forward-declarable references for recursive grammars (runtime, not module-level names). |
 | `generate` | `generate` | ✅ | Seeded random input synthesis by walking the AST; round-trips for non-recursive grammars. |
-| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `defparsec!` / `defparsecp!` / `defcombinator!` / `defcombinatorp!` | ✅ | Named parse functions and combinator factories. `defparsec!`/`defparsecp!` generate specialized inline code for most combinators — primitives (`string`, `integer_exact`, `integer_min`, `integer_range`, `ascii_char`, `utf8_char`, `ascii_string`, `utf8_string`, `bytes`, `empty`, `eos`), `concat`/`ignore`/`choice`/`optional`/`repeat`/`duplicate`/`eventually`/`repeat_while`, the transform/tagging/position combinators, and `post_traverse`/`pre_traverse`. The rest (`label`, `lookahead`/`lookahead_not`, `debug`) fall back to a `OnceLock`-cached runtime `Parser`. `defcombinator!`/`defcombinatorp!` always cache via `OnceLock`. |
+| `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | `defparsec!` / `defparsecp!` / `defcombinator!` / `defcombinatorp!` | ✅ | Named parse functions and combinator factories. `defparsec!`/`defparsecp!` generate specialized inline code for nearly the whole static combinator surface — primitives (`string`, `integer_exact`/`integer_min`/`integer_range`, `ascii_char`, `utf8_char`, `ascii_string`, `utf8_string`, `bytes`, `empty`, `eos`), `concat`/`ignore`/`choice`/`optional`/`repeat`/`duplicate`/`eventually`/`repeat_while`, the transform/tagging/position combinators, `post_traverse`/`pre_traverse`, and `label`/`lookahead`/`lookahead_not`/`debug`. Only `times`, recursive references (`parsec`/`ParserRef`), and calls whose arguments aren't literal (a `vec!`/predicate list or sub-parser supplied via a variable) fall back to a `OnceLock`-cached runtime `Parser`. `defcombinator!`/`defcombinatorp!` always cache via `OnceLock`. |
 | `defparsec` (inline use) | `compile_parser!` | ✅ | Generates a specialized `Parser` backed by a native closure for fully-recognizable expressions; falls back to the unchanged runtime expression otherwise. |
 
 ## Summary
@@ -83,15 +83,16 @@ grammar is introspectable — which is what unblocked `generate`.
 
 The `defparsec!`/`defparsecp!`/`defcombinator!`/`defcombinatorp!` macro family
 is now implemented. `defparsec!`/`defparsecp!` emit specialized inline Rust (no
-`Ast` interpreter) for most combinators — primitives, `concat`/`ignore`,
-control flow (`choice`/`optional`/`repeat`/`duplicate`/`eventually`/
-`repeat_while`), the transform/tagging/position combinators, and
-`post_traverse`/`pre_traverse`. The rest (`label`, `lookahead`/`lookahead_not`,
-`debug`)
-fall back to a `OnceLock`-cached runtime parser. `compile_parser!` follows the
-same strategy, wrapping the generated code in an `Ast::Native` closure.
-`defcombinator!`/`defcombinatorp!` always use `OnceLock`-cached runtime parsers
-and return a clonable `Parser`.
+`Ast` interpreter) for nearly the whole static combinator surface — primitives,
+`concat`/`ignore`, control flow (`choice`/`optional`/`repeat`/`duplicate`/
+`eventually`/`repeat_while`), the transform/tagging/position combinators,
+`post_traverse`/`pre_traverse`, and `label`/`lookahead`/`lookahead_not`/`debug`.
+Only `times`, recursive references (`parsec`/`ParserRef`), and calls whose
+arguments aren't literal (a `vec!`/predicate list or sub-parser supplied via a
+variable) fall back to a `OnceLock`-cached runtime parser. `compile_parser!`
+follows the same strategy, wrapping the generated code in an `Ast::Native`
+closure. `defcombinator!`/`defcombinatorp!` always use `OnceLock`-cached runtime
+parsers and return a clonable `Parser`.
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
@@ -110,12 +111,12 @@ named parsers, which belong with codegen.
 | Hand-written, same tokens | ~0.063 µs | the *fair* codegen ceiling (still allocates the result `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
 
-Codegen specialization now covers most of the combinator surface (see the macro
-row above); only `label`, `lookahead`/`lookahead_not`, and `debug` still
-fall back to the runtime parser. A specializer must emit **identical tokens**,
-so its ceiling is the third row, not the bottom — and the generated code lands
-at ~0.15 µs, about **1.7× faster than the interpreter** and within ~2.5× of that
-fair ceiling.
+Codegen specialization now covers nearly the whole static combinator surface
+(see the macro row above); only `times`, recursive references, and calls with
+non-literal arguments still fall back to the runtime parser. A specializer must
+emit **identical tokens**, so its ceiling is the third row, not the bottom — and
+the generated code lands at ~0.15 µs, about **1.7× faster than the interpreter**
+and within ~2.5× of that fair ceiling.
 
 Three optimizations are folded in. `ignore`d sub-combinators allocate no
 throwaway tokens (the interpreter threads an `emit` flag so leaves under

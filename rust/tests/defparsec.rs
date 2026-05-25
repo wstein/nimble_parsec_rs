@@ -583,3 +583,56 @@ fn compile_parser_utf8_string_matches_runtime() {
     assert_specialized(&any);
     assert_parity(&any, &utf8_string(vec![], 0, None), &["héllo", "", "abc"]);
 }
+
+// ---------------------------------------------------------------------------
+// error / zero-width / passthrough codegen parity:
+// label, lookahead, lookahead_not, debug
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_label_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, label};
+
+    let compiled = compile_parser!(label(string("foo"), "a greeting"));
+    assert_specialized(&compiled);
+    // "foo" passes through; "bar"/"" fail with the rewritten "expected a greeting".
+    assert_parity(
+        &compiled,
+        &label(string("foo"), "a greeting"),
+        &["foo", "bar", ""],
+    );
+}
+
+#[test]
+fn compile_parser_lookahead_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, lookahead};
+
+    // Positive zero-width assertion: peek "ab", then actually consume "a".
+    let compiled = compile_parser!(concat(lookahead(string("ab")), string("a")));
+    assert_specialized(&compiled);
+    let runtime = concat(lookahead(string("ab")), string("a"));
+    // match (peek ok, consume "a"); peek fails; nothing to peek.
+    assert_parity(&compiled, &runtime, &["abc", "axc", "a", ""]);
+}
+
+#[test]
+fn compile_parser_lookahead_not_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, lookahead_not};
+
+    // Negative zero-width assertion: succeed only when "x" is NOT ahead.
+    let compiled = compile_parser!(concat(lookahead_not(string("x")), string("a")));
+    assert_specialized(&compiled);
+    let runtime = concat(lookahead_not(string("x")), string("a"));
+    // not-"x" then consume "a"; "x" ahead -> fail; below.
+    assert_parity(&compiled, &runtime, &["abc", "xab", "a", ""]);
+}
+
+#[test]
+fn compile_parser_debug_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, debug};
+
+    // debug passes results through unchanged; stderr output is not asserted.
+    let compiled = compile_parser!(debug(integer_min(1)));
+    assert_specialized(&compiled);
+    assert_parity(&compiled, &debug(integer_min(1)), &["42x", "x", ""]);
+}
