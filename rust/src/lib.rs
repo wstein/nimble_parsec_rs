@@ -1455,9 +1455,11 @@ fn run_ast<'a>(
         Ast::Map(inner, f) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 out.extend(drained.into_iter().map(|v| f(v)));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
@@ -1465,9 +1467,11 @@ fn run_ast<'a>(
         Ast::Reduce(inner, f) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 out.push(f(drained));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
@@ -1475,9 +1479,11 @@ fn run_ast<'a>(
         Ast::Tag(name, inner) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 out.push(Value::Tagged((*name).to_string(), drained));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
@@ -1503,9 +1509,11 @@ fn run_ast<'a>(
         Ast::Wrap(inner) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 out.push(Value::List(drained));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
@@ -1531,12 +1539,14 @@ fn run_ast<'a>(
         Ast::ByteOffset(inner) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 out.push(Value::List(vec![
                     Value::List(drained),
                     Value::Int(Integer::from(tail.cursor.byte_offset)),
                 ]));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
@@ -1544,13 +1554,15 @@ fn run_ast<'a>(
         Ast::Line(inner) => {
             let start = out.len();
             let tail = run_ast(inner, input, cursor, context, true, out)?;
-            let drained = out.split_off(start);
             if emit {
+                let drained = out.split_off(start);
                 let position = Value::List(vec![
                     Value::Int(Integer::from(tail.cursor.line)),
                     Value::Int(Integer::from(tail.cursor.line_start_offset)),
                 ]);
                 out.push(Value::List(vec![Value::List(drained), position]));
+            } else {
+                out.truncate(start);
             }
             Ok(tail)
         }
