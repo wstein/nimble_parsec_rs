@@ -105,9 +105,9 @@ named parsers, which belong with codegen.
 
 | Variant | Time | Notes |
 | --- | --- | --- |
-| Interpreter (combinators) | ~0.81 µs | `Parser::parse` walking the `Ast` |
-| **Specialized `compile_parser!`** | **~0.14 µs** | generated inline code (`Ast::Native`), emits identical tokens |
-| Hand-written, same tokens | ~0.07 µs | the *fair* codegen ceiling (still allocates the result `Vec`) |
+| Interpreter (combinators) | ~0.25 µs | `Parser::parse` walking the `Ast` |
+| **Specialized `compile_parser!`** | **~0.15 µs** | generated inline code (`Ast::Native`), emits identical tokens |
+| Hand-written, same tokens | ~0.063 µs | the *fair* codegen ceiling (still allocates the result `Vec`) |
 | Hand-written, length only | ~0.0003 µs | absolute ceiling (allocates nothing) |
 
 Codegen specialization now covers most of the combinator surface (see the macro
@@ -115,22 +115,27 @@ row above); only `label`, `lookahead`/`lookahead_not`, `debug`,
 `ascii_string`/`utf8_string`, `bytes`, and the general `integer_range` still
 fall back to the runtime parser. A specializer must emit **identical tokens**,
 so its ceiling is the third row, not the bottom — and the generated code lands
-at ~0.14 µs, about **6× faster than the interpreter** and within ~2× of that
+at ~0.15 µs, about **1.7× faster than the interpreter** and within ~2.5× of that
 fair ceiling.
 
-Two earlier optimizations are folded in: `ignore`d sub-combinators allocate no
+Three optimizations are folded in. `ignore`d sub-combinators allocate no
 throwaway tokens (the interpreter threads an `emit` flag so leaves under
-`ignore` skip building tokens), and `Value::Int` now uses the small-integer
-[`Integer`] representation, so in-range integers no longer heap-allocate a
-`BigInt` — this alone took the interpreter from ~1.16 to ~0.81 µs and the
-specialized path from ~0.56 to ~0.14 µs.
+`ignore` skip building tokens). `Value::Int` uses the small-integer [`Integer`]
+representation, so in-range integers no longer heap-allocate a `BigInt` — this
+alone took the interpreter from ~1.16 to ~0.81 µs and the specialized path from
+~0.56 to ~0.14 µs. Finally, the interpreter now threads **one shared token
+accumulator** (`&mut Vec<Value>`) through the whole parse instead of returning a
+fresh `Vec` per combinator: leaves push into it and combinators that backtrack
+(`choice`, `optional`, the repetitions, `eventually`, the lookaheads) truncate
+it on a discarded attempt. That removed the per-leaf and per-`concat`
+allocations and took the interpreter from ~0.77 to ~0.25 µs (**~3× faster**, far
+more than the ~12% first estimated — the result `Vec`s dominated). The
+specialized path is unchanged: its top-level `Native` parser still returns its
+own `Vec`, which the interpreter now *adopts* directly when the accumulator is
+empty (the whole-grammar case) rather than copying.
 
-The remaining interpreter cost is dominated by AST dispatch and recursion (an
+The remaining interpreter cost is dominated by `Ast` dispatch and recursion (an
 `Arc`-walked tree), not allocation: context clones of an empty map are free, and
-only the integer leaves allocate result `Vec`s (~12% of the time on this
-grammar). **Deferred:** threading a shared token accumulator (`&mut Vec<Value>`)
-through the interpreter would remove those per-leaf `Vec`s, but it's a modest
-interpreter-only win (the codegen path already avoids them) for a sizeable
-rewrite with backtracking-truncation risk — postponed. The higher-leverage
-direction is broadening the codegen subset so more grammars take the ~0.14 µs
-specialized path.
+the shared accumulator means only the final result `Vec` is allocated. The
+higher-leverage direction from here is broadening the codegen subset so more
+grammars take the ~0.15 µs specialized path.

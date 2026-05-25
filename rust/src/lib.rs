@@ -394,7 +394,14 @@ impl Parser {
     /// Runs the parser from an explicit `cursor` and `context`, threading both
     /// through the parse. Most callers want [`Parser::parse`].
     pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
-        run_ast(&self.ast, input, cursor, context, true)
+        let mut tokens = Vec::new();
+        let tail = run_ast(&self.ast, input, cursor, context, true, &mut tokens)?;
+        Ok(ParseSuccess {
+            tokens,
+            rest: tail.rest,
+            cursor: tail.cursor,
+            context: tail.context,
+        })
     }
 
     /// Parses `input` from the start (default cursor, empty context).
@@ -1021,21 +1028,33 @@ pub mod __private {
     }
 }
 
-/// Interprets `ast`. `emit` is `false` while inside an `ignore` (or zero-width
-/// assertion) subtree, where result tokens are discarded: leaf producers then
-/// skip building tokens. Transform nodes always run their inner with `emit =
-/// true`, so observable token-dependent effects (`unwrap_and_tag` validation,
-/// `post_traverse`/`pre_traverse` context and errors) are unchanged.
+/// Where a successful parse stopped: the unconsumed input, position, and
+/// threaded context. Result tokens are pushed into a shared accumulator
+/// (`out`) rather than returned, so combinators don't each allocate a `Vec`.
+struct Tail<'a> {
+    rest: &'a str,
+    cursor: Cursor,
+    context: Context,
+}
+
+/// Interprets `ast`, pushing result tokens into `out`. `emit` is `false` while
+/// inside an `ignore` (or zero-width assertion) subtree, where result tokens are
+/// discarded: leaf producers then skip building tokens. Transform nodes always
+/// run their inner with `emit = true`, so observable token-dependent effects
+/// (`unwrap_and_tag` validation, `post_traverse`/`pre_traverse` context and
+/// errors) are unchanged. Combinators that recover from an inner failure
+/// (`choice`, `optional`, the repetitions, `eventually`, the lookaheads) restore
+/// `out` to its prior length on the discarded attempt.
 fn run_ast<'a>(
     ast: &Arc<Ast>,
     input: &'a str,
     cursor: Cursor,
     context: Context,
     emit: bool,
-) -> ParseResult<'a> {
+    out: &mut Vec<Value>,
+) -> Result<Tail<'a>, ParseFailure<'a>> {
     match ast.as_ref() {
-        Ast::Empty => Ok(ParseSuccess {
-            tokens: Vec::new(),
+        Ast::Empty => Ok(Tail {
             rest: input,
             cursor,
             context,
@@ -1049,12 +1068,10 @@ fn run_ast<'a>(
 
         Ast::Str { lit, reason } => {
             if let Some(rest) = input.strip_prefix(lit.as_ref()) {
-                Ok(ParseSuccess {
-                    tokens: if emit {
-                        vec![Value::Str(lit.to_string())]
-                    } else {
-                        Vec::new()
-                    },
+                if emit {
+                    out.push(Value::Str(lit.to_string()));
+                }
+                Ok(Tail {
                     rest,
                     cursor: advance(cursor, lit),
                     context,
@@ -1084,12 +1101,10 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..1];
-            Ok(ParseSuccess {
-                tokens: if emit {
-                    vec![Value::Int(Integer::from(b))]
-                } else {
-                    Vec::new()
-                },
+            if emit {
+                out.push(Value::Int(Integer::from(b)));
+            }
+            Ok(Tail {
                 rest: &input[1..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1112,12 +1127,10 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..ch.len_utf8()];
-            Ok(ParseSuccess {
-                tokens: if emit {
-                    vec![Value::Int(Integer::from(ch as u32))]
-                } else {
-                    Vec::new()
-                },
+            if emit {
+                out.push(Value::Int(Integer::from(ch as u32)));
+            }
+            Ok(Tail {
                 rest: &input[ch.len_utf8()..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1151,12 +1164,10 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..consumed_end];
-            Ok(ParseSuccess {
-                tokens: if emit {
-                    vec![Value::Str(consumed.to_string())]
-                } else {
-                    Vec::new()
-                },
+            if emit {
+                out.push(Value::Str(consumed.to_string()));
+            }
+            Ok(Tail {
                 rest: &input[consumed_end..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1192,12 +1203,10 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..i];
-            Ok(ParseSuccess {
-                tokens: if emit {
-                    vec![Value::Str(consumed.to_string())]
-                } else {
-                    Vec::new()
-                },
+            if emit {
+                out.push(Value::Str(consumed.to_string()));
+            }
+            Ok(Tail {
                 rest: &input[i..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1205,16 +1214,16 @@ fn run_ast<'a>(
         }
 
         Ast::Bytes(count) => match input.get(..*count) {
-            Some(consumed) => Ok(ParseSuccess {
-                tokens: if emit {
-                    vec![Value::Str(consumed.to_string())]
-                } else {
-                    Vec::new()
-                },
-                rest: &input[*count..],
-                cursor: advance(cursor, consumed),
-                context,
-            }),
+            Some(consumed) => {
+                if emit {
+                    out.push(Value::Str(consumed.to_string()));
+                }
+                Ok(Tail {
+                    rest: &input[*count..],
+                    cursor: advance(cursor, consumed),
+                    context,
+                })
+            }
             None => Err(ParseFailure {
                 reason: format!("expected {count} bytes"),
                 rest: input,
@@ -1224,8 +1233,7 @@ fn run_ast<'a>(
 
         Ast::Eos => {
             if input.is_empty() {
-                Ok(ParseSuccess {
-                    tokens: Vec::new(),
+                Ok(Tail {
                     rest: input,
                     cursor,
                     context,
@@ -1262,13 +1270,10 @@ fn run_ast<'a>(
                 });
             }
             let consumed = &input[..i];
-            let tokens = if emit {
-                vec![Value::Int(Integer::from_digits(consumed))]
-            } else {
-                Vec::new()
-            };
-            Ok(ParseSuccess {
-                tokens,
+            if emit {
+                out.push(Value::Int(Integer::from_digits(consumed)));
+            }
+            Ok(Tail {
                 rest: &input[i..],
                 cursor: advance(cursor, consumed),
                 context,
@@ -1276,44 +1281,52 @@ fn run_ast<'a>(
         }
 
         Ast::Concat(left, right) => {
-            let mut left_ok = run_ast(left, input, cursor, context, emit)?;
-            let right_ok = run_ast(right, left_ok.rest, left_ok.cursor, left_ok.context, emit)?;
-            left_ok.tokens.extend(right_ok.tokens);
-            Ok(ParseSuccess {
-                tokens: left_ok.tokens,
-                rest: right_ok.rest,
-                cursor: right_ok.cursor,
-                context: right_ok.context,
-            })
+            let left_tail = run_ast(left, input, cursor, context, emit, out)?;
+            run_ast(
+                right,
+                left_tail.rest,
+                left_tail.cursor,
+                left_tail.context,
+                emit,
+                out,
+            )
         }
 
         Ast::Ignore(inner) => {
-            // Inner tokens are discarded, so leaves below can skip building them.
-            let ok = run_ast(inner, input, cursor, context, false)?;
-            Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            // Inner tokens are discarded; run with emit = false so leaves skip
+            // building them, and truncate as a backstop in case any node pushed
+            // regardless.
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, false, out)?;
+            out.truncate(start);
+            Ok(tail)
         }
 
-        Ast::Optional(inner) => match run_ast(inner, input, cursor, context.clone(), emit) {
-            Ok(ok) => Ok(ok),
-            Err(_) => Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            }),
-        },
+        Ast::Optional(inner) => {
+            let start = out.len();
+            match run_ast(inner, input, cursor, context.clone(), emit, out) {
+                Ok(tail) => Ok(tail),
+                Err(_) => {
+                    out.truncate(start);
+                    Ok(Tail {
+                        rest: input,
+                        cursor,
+                        context,
+                    })
+                }
+            }
+        }
 
         Ast::Choice(choices) => {
+            let start = out.len();
             let mut reasons = Vec::with_capacity(choices.len());
             for choice in choices {
-                match run_ast(choice, input, cursor, context.clone(), emit) {
-                    Ok(ok) => return Ok(ok),
-                    Err(err) => reasons.push(err.reason),
+                match run_ast(choice, input, cursor, context.clone(), emit, out) {
+                    Ok(tail) => return Ok(tail),
+                    Err(err) => {
+                        out.truncate(start);
+                        reasons.push(err.reason);
+                    }
                 }
             }
             let reason = if reasons.is_empty() {
@@ -1339,22 +1352,20 @@ fn run_ast<'a>(
             |_, _, _| true,
             true,
             emit,
+            out,
         ),
 
         Ast::Duplicate { inner, n } => {
             let mut rest = input;
             let mut cur = cursor;
             let mut ctx = context;
-            let mut tokens = Vec::new();
             for _ in 0..*n {
-                let ok = run_ast(inner, rest, cur, ctx, emit)?;
-                tokens.extend(ok.tokens);
-                rest = ok.rest;
-                cur = ok.cursor;
-                ctx = ok.context;
+                let tail = run_ast(inner, rest, cur, ctx, emit, out)?;
+                rest = tail.rest;
+                cur = tail.cursor;
+                ctx = tail.context;
             }
-            Ok(ParseSuccess {
-                tokens,
+            Ok(Tail {
                 rest,
                 cursor: cur,
                 context: ctx,
@@ -1364,9 +1375,11 @@ fn run_ast<'a>(
         Ast::Eventually(inner) => {
             let mut rest = input;
             let mut cur = cursor;
+            let start = out.len();
             loop {
-                if let Ok(ok) = run_ast(inner, rest, cur, context.clone(), emit) {
-                    return Ok(ok);
+                match run_ast(inner, rest, cur, context.clone(), emit, out) {
+                    Ok(tail) => return Ok(tail),
+                    Err(_) => out.truncate(start),
                 }
                 match rest.chars().next() {
                     Some(ch) => {
@@ -1386,27 +1399,36 @@ fn run_ast<'a>(
         }
 
         Ast::Lookahead(inner) => {
-            run_ast(inner, input, cursor, context.clone(), false).map(|_| ParseSuccess {
-                tokens: Vec::new(),
+            // Zero-width: run with emit = false, then restore `out` so nothing
+            // the assertion matched leaks into the result.
+            let start = out.len();
+            run_ast(inner, input, cursor, context.clone(), false, out)?;
+            out.truncate(start);
+            Ok(Tail {
                 rest: input,
                 cursor,
                 context,
             })
         }
 
-        Ast::LookaheadNot(inner) => match run_ast(inner, input, cursor, context.clone(), false) {
-            Ok(_) => Err(ParseFailure {
-                reason: "did not expect lookahead parser to match".to_string(),
-                rest: input,
-                cursor,
-            }),
-            Err(_) => Ok(ParseSuccess {
-                tokens: Vec::new(),
-                rest: input,
-                cursor,
-                context,
-            }),
-        },
+        Ast::LookaheadNot(inner) => {
+            let start = out.len();
+            let matched = run_ast(inner, input, cursor, context.clone(), false, out).is_ok();
+            out.truncate(start);
+            if matched {
+                Err(ParseFailure {
+                    reason: "did not expect lookahead parser to match".to_string(),
+                    rest: input,
+                    cursor,
+                })
+            } else {
+                Ok(Tail {
+                    rest: input,
+                    cursor,
+                    context,
+                })
+            }
+        }
 
         Ast::RepeatWhile {
             inner,
@@ -1424,79 +1446,82 @@ fn run_ast<'a>(
             |rest, cur, ctx| matches!(while_fn(rest, cur, ctx), RepeatWhileControl::Cont),
             false,
             emit,
+            out,
         ),
 
+        // The transform combinators always run their inner with emit = true so
+        // they can observe its tokens (to map/reduce/tag/validate), then push
+        // their own result only when the enclosing context emits.
         Ast::Map(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            Ok(ParseSuccess {
-                tokens: ok.tokens.into_iter().map(|v| f(v)).collect(),
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                out.extend(drained.into_iter().map(|v| f(v)));
+            }
+            Ok(tail)
         }
 
         Ast::Reduce(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            Ok(ParseSuccess {
-                tokens: vec![f(ok.tokens)],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                out.push(f(drained));
+            }
+            Ok(tail)
         }
 
         Ast::Tag(name, inner) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            Ok(ParseSuccess {
-                tokens: vec![Value::Tagged((*name).to_string(), ok.tokens)],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                out.push(Value::Tagged((*name).to_string(), drained));
+            }
+            Ok(tail)
         }
 
         Ast::UnwrapAndTag(name, inner) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            let mut tokens = ok.tokens;
-            if tokens.len() != 1 {
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let mut drained = out.split_off(start);
+            if drained.len() != 1 {
                 return Err(ParseFailure {
                     reason: format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
                     rest: input,
                     cursor,
                 });
             }
-            let value = tokens.pop().expect("length checked above");
-            Ok(ParseSuccess {
-                tokens: vec![Value::KeyValue((*name).to_string(), Box::new(value))],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let value = drained.pop().expect("length checked above");
+            if emit {
+                out.push(Value::KeyValue((*name).to_string(), Box::new(value)));
+            }
+            Ok(tail)
         }
 
         Ast::Wrap(inner) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            Ok(ParseSuccess {
-                tokens: vec![Value::List(ok.tokens)],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                out.push(Value::List(drained));
+            }
+            Ok(tail)
         }
 
         Ast::Replace(inner, value) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            Ok(ParseSuccess {
-                tokens: vec![value.clone()],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            out.truncate(start);
+            if emit {
+                out.push(value.clone());
+            }
+            Ok(tail)
         }
 
         Ast::Label(inner, lbl) => {
-            run_ast(inner, input, cursor, context, emit).map_err(|err| ParseFailure {
+            run_ast(inner, input, cursor, context, emit, out).map_err(|err| ParseFailure {
                 reason: format!("expected {lbl}"),
                 rest: err.rest,
                 cursor: err.cursor,
@@ -1504,75 +1529,98 @@ fn run_ast<'a>(
         }
 
         Ast::ByteOffset(inner) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            let token = Value::List(vec![
-                Value::List(ok.tokens),
-                Value::Int(Integer::from(ok.cursor.byte_offset)),
-            ]);
-            Ok(ParseSuccess {
-                tokens: vec![token],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                out.push(Value::List(vec![
+                    Value::List(drained),
+                    Value::Int(Integer::from(tail.cursor.byte_offset)),
+                ]));
+            }
+            Ok(tail)
         }
 
         Ast::Line(inner) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            let position = Value::List(vec![
-                Value::Int(Integer::from(ok.cursor.line)),
-                Value::Int(Integer::from(ok.cursor.line_start_offset)),
-            ]);
-            let token = Value::List(vec![Value::List(ok.tokens), position]);
-            Ok(ParseSuccess {
-                tokens: vec![token],
-                rest: ok.rest,
-                cursor: ok.cursor,
-                context: ok.context,
-            })
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            if emit {
+                let position = Value::List(vec![
+                    Value::Int(Integer::from(tail.cursor.line)),
+                    Value::Int(Integer::from(tail.cursor.line_start_offset)),
+                ]);
+                out.push(Value::List(vec![Value::List(drained), position]));
+            }
+            Ok(tail)
         }
 
         Ast::Debug(inner) => {
             eprintln!("debug: parsing {input:?} at {cursor:?}");
-            let result = run_ast(inner, input, cursor, context, emit);
+            let start = out.len();
+            let result = run_ast(inner, input, cursor, context, emit, out);
             match &result {
-                Ok(ok) => eprintln!("debug: ok tokens={:?} rest={:?}", ok.tokens, ok.rest),
+                Ok(tail) => {
+                    eprintln!("debug: ok tokens={:?} rest={:?}", &out[start..], tail.rest)
+                }
                 Err(err) => eprintln!("debug: error {:?}", err.reason),
             }
             result
         }
 
         Ast::PostTraverse(inner, f) => {
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            match f(ok.tokens, ok.context, ok.cursor) {
-                Ok((tokens, context)) => Ok(ParseSuccess {
-                    tokens,
-                    rest: ok.rest,
-                    cursor: ok.cursor,
-                    context,
-                }),
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            let Tail {
+                rest,
+                cursor: end,
+                context: ctx,
+            } = tail;
+            match f(drained, ctx, end) {
+                Ok((tokens, context)) => {
+                    if emit {
+                        out.extend(tokens);
+                    }
+                    Ok(Tail {
+                        rest,
+                        cursor: end,
+                        context,
+                    })
+                }
                 Err(reason) => Err(ParseFailure {
                     reason,
-                    rest: ok.rest,
-                    cursor: ok.cursor,
+                    rest,
+                    cursor: end,
                 }),
             }
         }
 
         Ast::PreTraverse(inner, f) => {
             let before = cursor;
-            let ok = run_ast(inner, input, cursor, context, true)?;
-            match f(ok.tokens, ok.context, before) {
-                Ok((tokens, context)) => Ok(ParseSuccess {
-                    tokens,
-                    rest: ok.rest,
-                    cursor: ok.cursor,
-                    context,
-                }),
+            let start = out.len();
+            let tail = run_ast(inner, input, cursor, context, true, out)?;
+            let drained = out.split_off(start);
+            let Tail {
+                rest,
+                cursor: end,
+                context: ctx,
+            } = tail;
+            match f(drained, ctx, before) {
+                Ok((tokens, context)) => {
+                    if emit {
+                        out.extend(tokens);
+                    }
+                    Ok(Tail {
+                        rest,
+                        cursor: end,
+                        context,
+                    })
+                }
                 Err(reason) => Err(ParseFailure {
                     reason,
-                    rest: ok.rest,
-                    cursor: ok.cursor,
+                    rest,
+                    cursor: end,
                 }),
             }
         }
@@ -1581,10 +1629,28 @@ fn run_ast<'a>(
             let inner = cell
                 .get()
                 .expect("parsec reference used before it was defined");
-            run_ast(inner, input, cursor, context, emit)
+            run_ast(inner, input, cursor, context, emit, out)
         }
 
-        Ast::Native(f) => f(input, cursor, context),
+        Ast::Native(f) => {
+            // A native parser returns its own token `Vec` (its signature
+            // predates the accumulator). When `out` is still empty — the common
+            // case where a `compile_parser!` parser is the whole grammar — adopt
+            // that `Vec` directly instead of copying element by element.
+            let ok = f(input, cursor, context)?;
+            if emit {
+                if out.is_empty() {
+                    *out = ok.tokens;
+                } else {
+                    out.extend(ok.tokens);
+                }
+            }
+            Ok(Tail {
+                rest: ok.rest,
+                cursor: ok.cursor,
+                context: ok.context,
+            })
+        }
     }
 }
 
@@ -1606,11 +1672,11 @@ fn run_repetition<'a>(
     mut should_continue: impl FnMut(&str, Cursor, &Context) -> bool,
     propagate_inner_error: bool,
     emit: bool,
-) -> ParseResult<'a> {
+    out: &mut Vec<Value>,
+) -> Result<Tail<'a>, ParseFailure<'a>> {
     let mut rest = input;
     let mut cur = cursor;
     let mut ctx = context;
-    let mut tokens = Vec::new();
     let mut count = 0usize;
 
     loop {
@@ -1622,18 +1688,22 @@ fn run_repetition<'a>(
         if !should_continue(rest, cur, &ctx) {
             break;
         }
-        match run_ast(inner, rest, cur, ctx.clone(), emit) {
-            Ok(ok) => {
-                if ok.rest.len() == rest.len() {
+        let iter_start = out.len();
+        match run_ast(inner, rest, cur, ctx.clone(), emit, out) {
+            Ok(tail) => {
+                if tail.rest.len() == rest.len() {
+                    // Non-consuming iteration: drop its tokens and stop, rather
+                    // than loop forever.
+                    out.truncate(iter_start);
                     break;
                 }
-                tokens.extend(ok.tokens);
-                rest = ok.rest;
-                cur = ok.cursor;
-                ctx = ok.context;
+                rest = tail.rest;
+                cur = tail.cursor;
+                ctx = tail.context;
                 count += 1;
             }
             Err(err) => {
+                out.truncate(iter_start);
                 if propagate_inner_error && count < min {
                     return Err(err);
                 }
@@ -1650,8 +1720,7 @@ fn run_repetition<'a>(
         });
     }
 
-    Ok(ParseSuccess {
-        tokens,
+    Ok(Tail {
         rest,
         cursor: cur,
         context: ctx,
