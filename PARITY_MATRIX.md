@@ -91,8 +91,13 @@ Only `times`, recursive references (`parsec`/`ParserRef`), and calls whose
 arguments aren't literal (a `vec!`/predicate list or sub-parser supplied via a
 variable) fall back to a `OnceLock`-cached runtime parser. `compile_parser!`
 follows the same strategy, wrapping the generated code in an `Ast::Native`
-closure. `defcombinator!`/`defcombinatorp!` always use `OnceLock`-cached runtime
-parsers and return a clonable `Parser`.
+closure.
+
+`defcombinator!`/`defcombinatorp!` never specialize — regardless of whether the
+combinator expression is recognizable, they always wrap it in a `OnceLock`-cached
+runtime `Parser` and return a clonable `Parser`. (The factory pattern needs a
+reusable `Parser` value, not inline code, so the result is a runtime `Ast` tree,
+never an `Ast::Native`.)
 
 The `quoted_*` traversal variants stay ❌ because they are compile-time forms of
 the now-ported runtime `post_traverse`/`pre_traverse`. `parsec` is ported as a
