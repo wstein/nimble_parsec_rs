@@ -289,6 +289,73 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
             }
         }
 
+        // -- integer_range -----------------------------------------------
+        "integer_range" if args.len() == 2 => {
+            let min_n = &args[0];
+            let max = &args[1];
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Int(
+                        ::nimble_parsec_rs::__private::parse_integer(__consumed),
+                    ));
+                }
+            };
+            Some(quote! {{
+                let __min: usize = #min_n;
+                let __max_opt: ::std::option::Option<usize> = #max;
+                let __raw = __input.as_bytes();
+                let mut __i = 0usize;
+                while __i < __raw.len() {
+                    if let ::std::option::Option::Some(__max) = __max_opt {
+                        if __i >= __max { break; }
+                    }
+                    if __raw[__i].is_ascii_digit() { __i += 1; } else { break; }
+                }
+                if __i < __min {
+                    return Err(::nimble_parsec_rs::ParseFailure {
+                        reason: "expected integer".to_string(),
+                        rest: __input,
+                        cursor: __cursor,
+                    });
+                }
+                let __consumed = &__input[..__i];
+                #push
+                __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                __input = &__input[__i..];
+            }})
+        }
+
+        // -- bytes --------------------------------------------------------
+        "bytes" if args.len() == 1 => {
+            let count = &args[0];
+            let push = if ignored {
+                quote! {}
+            } else {
+                quote! {
+                    __tokens.push(::nimble_parsec_rs::Value::Str(__consumed.to_string()));
+                }
+            };
+            Some(quote! {{
+                let __count: usize = #count;
+                match __input.get(..__count) {
+                    ::std::option::Option::Some(__consumed) => {
+                        #push
+                        __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __consumed);
+                        __input = &__input[__count..];
+                    }
+                    ::std::option::Option::None => {
+                        return Err(::nimble_parsec_rs::ParseFailure {
+                            reason: ::std::format!("expected {} bytes", __count),
+                            rest: __input,
+                            cursor: __cursor,
+                        });
+                    }
+                }
+            }})
+        }
+
         // -- ignore -------------------------------------------------------
         "ignore" if args.len() == 1 => codegen_impl(&args[0], true),
 

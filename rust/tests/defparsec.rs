@@ -19,6 +19,19 @@ fn assert_parity(compiled: &Parser, runtime: &Parser, inputs: &[&str]) {
     }
 }
 
+/// Asserts a `compile_parser!`-built parser actually took the specialized path
+/// rather than silently falling back to the runtime interpreter. A specialized
+/// parser is wrapped in `Ast::Native`, which the structural `Debug` renders as
+/// `Native(...)`; a fallback renders as the underlying `Ast` tree (e.g.
+/// `Bytes(3)`), so the absence of `Native(` would mean codegen never triggered.
+fn assert_specialized(parser: &Parser) {
+    let debug = format!("{parser:?}");
+    assert!(
+        debug.contains("Native("),
+        "expected a specialized (Native) parser, got: {debug}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // defparsec! — generates a public parse function with codegen
 // ---------------------------------------------------------------------------
@@ -482,4 +495,41 @@ fn compile_parser_traversals_match_runtime() {
     )));
     let failing_rt = post_traverse(integer_min(1), |_t, _c, _cur| Err("nope".to_string()));
     assert_parity(&failing, &failing_rt, &["1", "x"]);
+}
+
+// ---------------------------------------------------------------------------
+// leaf-producer codegen parity: bytes, integer_range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compile_parser_bytes_matches_runtime() {
+    use nimble_parsec_rs::{bytes, compile_parser};
+
+    let compiled = compile_parser!(bytes(3));
+    assert_specialized(&compiled);
+    // Successes, a too-short input, and a multi-byte input where the byte count
+    // both does and does not land on a UTF-8 boundary ("é" is two bytes).
+    assert_parity(&compiled, &bytes(3), &["abcd", "ab", "", "héllo", "aé"]);
+}
+
+#[test]
+fn compile_parser_integer_range_matches_runtime() {
+    use nimble_parsec_rs::{compile_parser, integer_range};
+
+    let bounded = compile_parser!(integer_range(2, Some(4)));
+    assert_specialized(&bounded);
+    assert_parity(
+        &bounded,
+        &integer_range(2, Some(4)),
+        &["1", "12", "1234", "123456", "x", ""],
+    );
+
+    // The `None` (unbounded-max) form must specialize too.
+    let unbounded = compile_parser!(integer_range(1, None));
+    assert_specialized(&unbounded);
+    assert_parity(
+        &unbounded,
+        &integer_range(1, None),
+        &["7", "12345", "x", ""],
+    );
 }
