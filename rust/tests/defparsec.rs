@@ -517,9 +517,14 @@ fn compile_parser_bytes_matches_runtime() {
 
     let compiled = compile_parser!(bytes(3));
     assert_specialized(&compiled);
-    // Successes, a too-short input, and a multi-byte input where the byte count
-    // both does and does not land on a UTF-8 boundary ("é" is two bytes).
+    // Successes, a too-short input, and multi-byte inputs landing on a boundary.
     assert_parity(&compiled, &bytes(3), &["abcd", "ab", "", "héllo", "aé"]);
+
+    // bytes(2) on "aé" lands mid-codepoint (a=1 byte, é=2 bytes), so `str::get`
+    // returns None and both must fail identically.
+    let mid = compile_parser!(bytes(2));
+    assert_specialized(&mid);
+    assert_parity(&mid, &bytes(2), &["aé", "ab", "a", ""]);
 }
 
 #[test]
@@ -542,6 +547,12 @@ fn compile_parser_integer_range_matches_runtime() {
         &integer_range(1, None),
         &["7", "12345", "x", ""],
     );
+
+    // Degenerate min > max: the max cap fires immediately, so the min check
+    // always fails. Both sides must agree on that.
+    let impossible = compile_parser!(integer_range(4, Some(2)));
+    assert_specialized(&impossible);
+    assert_parity(&impossible, &integer_range(4, Some(2)), &["1234", "12", ""]);
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +580,20 @@ fn compile_parser_ascii_string_matches_runtime() {
     let any = compile_parser!(ascii_string(vec![], 0, None));
     assert_specialized(&any);
     assert_parity(&any, &ascii_string(vec![], 0, None), &["abc123", "", "é"]);
+
+    // Degenerate max=Some(0) with min=0: matches nothing, emitting an empty
+    // Value::Str and consuming nothing.
+    let zero = compile_parser!(ascii_string(
+        vec![AsciiPredicate::Range(b'a'..=b'z')],
+        0,
+        Some(0)
+    ));
+    assert_specialized(&zero);
+    assert_parity(
+        &zero,
+        &ascii_string(vec![AsciiPredicate::Range(b'a'..=b'z')], 0, Some(0)),
+        &["abc", "", "1"],
+    );
 }
 
 #[test]
@@ -592,6 +617,20 @@ fn compile_parser_utf8_string_matches_runtime() {
     let any = compile_parser!(utf8_string(vec![], 0, None));
     assert_specialized(&any);
     assert_parity(&any, &utf8_string(vec![], 0, None), &["héllo", "", "abc"]);
+
+    // Degenerate max=Some(0) with min=0: matches nothing, emitting an empty
+    // Value::Str and consuming nothing.
+    let zero = compile_parser!(utf8_string(
+        vec![Utf8Predicate::Range('a'..='z')],
+        0,
+        Some(0)
+    ));
+    assert_specialized(&zero);
+    assert_parity(
+        &zero,
+        &utf8_string(vec![Utf8Predicate::Range('a'..='z')], 0, Some(0)),
+        &["abc", "", "1"],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +649,25 @@ fn compile_parser_label_matches_runtime() {
         &compiled,
         &label(string("foo"), "a greeting"),
         &["foo", "bar", ""],
+    );
+
+    // A multi-token inner: on success every inner token must reach the outer
+    // accumulator; on failure the reason is still rewritten.
+    let multi = compile_parser!(label(concat(string("a"), string("b")), "a then b"));
+    assert_specialized(&multi);
+    assert_parity(
+        &multi,
+        &label(concat(string("a"), string("b")), "a then b"),
+        &["ab", "ax", "b", ""],
+    );
+
+    // ignore(label(..)): tokens suppressed, input still consumed on success.
+    let ignored = compile_parser!(concat(ignore(label(string("x"), "ex")), string("y")));
+    assert_specialized(&ignored);
+    assert_parity(
+        &ignored,
+        &concat(ignore(label(string("x"), "ex")), string("y")),
+        &["xy", "y", "xz"],
     );
 }
 
@@ -645,4 +703,72 @@ fn compile_parser_debug_matches_runtime() {
     let compiled = compile_parser!(debug(integer_min(1)));
     assert_specialized(&compiled);
     assert_parity(&compiled, &debug(integer_min(1)), &["42x", "x", ""]);
+}
+
+// ---------------------------------------------------------------------------
+// ignore suppression for the newly-specialized leaf combinators
+// ---------------------------------------------------------------------------
+
+// The `ignored = true` codegen branch for bytes/integer_range/ascii_string/
+// utf8_string is a distinct code path (it omits the token push). Exercise each
+// one through `ignore(..)` and rely on assert_parity's token comparison to
+// catch any over- or under-emission.
+#[test]
+fn compile_parser_ignore_suppresses_new_combinators() {
+    use nimble_parsec_rs::{
+        ascii_string, bytes, compile_parser, integer_range, utf8_string, AsciiPredicate,
+        Utf8Predicate,
+    };
+
+    let p = compile_parser!(concat(ignore(bytes(2)), string("c")));
+    assert_specialized(&p);
+    assert_parity(
+        &p,
+        &concat(ignore(bytes(2)), string("c")),
+        &["abc", "ac", "ab"],
+    );
+
+    let p = compile_parser!(concat(ignore(integer_range(1, Some(3))), string("x")));
+    assert_specialized(&p);
+    assert_parity(
+        &p,
+        &concat(ignore(integer_range(1, Some(3))), string("x")),
+        &["12x", "x", "1234x"],
+    );
+
+    let p = compile_parser!(concat(
+        ignore(ascii_string(
+            vec![AsciiPredicate::Range(b'a'..=b'z')],
+            1,
+            None
+        )),
+        string("!")
+    ));
+    assert_specialized(&p);
+    assert_parity(
+        &p,
+        &concat(
+            ignore(ascii_string(
+                vec![AsciiPredicate::Range(b'a'..=b'z')],
+                1,
+                None,
+            )),
+            string("!"),
+        ),
+        &["abc!", "!", "1!"],
+    );
+
+    let p = compile_parser!(concat(
+        ignore(utf8_string(vec![Utf8Predicate::Range('a'..='z')], 1, None)),
+        string("!")
+    ));
+    assert_specialized(&p);
+    assert_parity(
+        &p,
+        &concat(
+            ignore(utf8_string(vec![Utf8Predicate::Range('a'..='z')], 1, None)),
+            string("!"),
+        ),
+        &["abc!", "!", "1!"],
+    );
 }
