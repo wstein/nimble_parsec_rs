@@ -1,7 +1,7 @@
 use nimble_parsec_rs::Integer;
 use nimble_parsec_rs::{
     choice, concat, defcombinator, defcombinatorp, defparsec, defparsecp, ignore, integer_exact,
-    integer_min, string, Parser, Value,
+    integer_min, string, times, Parser, TimesOptions, Value,
 };
 
 /// Asserts a codegen-built parser and the runtime-built equivalent agree on
@@ -67,13 +67,20 @@ fn defparsec_codegen_parse_fails() {
 // defparsec! — falls back to OnceLock runtime for unsupported combinators
 // ---------------------------------------------------------------------------
 
-defparsec!(parse_number, integer_min(1));
+// `times` has no codegen arm, so the macro must fall back to a OnceLock-cached
+// runtime parser rather than emitting specialized inline code.
+defparsec!(parse_xs, times(string("x"), TimesOptions::exact(2)));
 
 #[test]
 fn defparsec_runtime_fallback_parses() {
-    let ok = parse_number("42abc").expect("number parse");
-    assert_eq!(ok.rest, "abc");
-    assert_eq!(ok.tokens, vec![Value::Int(Integer::from(42u32))]);
+    let ok = parse_xs("xxrest").expect("two x's");
+    assert_eq!(ok.rest, "rest");
+    assert_eq!(
+        ok.tokens,
+        vec![Value::Str("x".to_string()), Value::Str("x".to_string())]
+    );
+    // Below the required count must fail.
+    assert!(parse_xs("xy").is_err());
 }
 
 // ---------------------------------------------------------------------------
