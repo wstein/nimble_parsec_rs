@@ -21,13 +21,16 @@ fn assert_parity(compiled: &Parser, runtime: &Parser, inputs: &[&str]) {
 
 /// Asserts a `compile_parser!`-built parser actually took the specialized path
 /// rather than silently falling back to the runtime interpreter. A specialized
-/// parser is wrapped in `Ast::Native`, which the structural `Debug` renders as
-/// `Native(...)`; a fallback renders as the underlying `Ast` tree (e.g.
-/// `Bytes(3)`), so the absence of `Native(` would mean codegen never triggered.
+/// parser is wrapped in `Ast::Native`, so `Parser`'s structural `Debug` renders
+/// as `Parser { ast: Native(<fn>) }`; a fallback renders the underlying `Ast`
+/// tree (e.g. `Parser { ast: Bytes(3) }`). We anchor on the `ast: Native(`
+/// field prefix rather than a bare `Native(` so a string/`Fail` literal that
+/// happens to contain `Native(`, or a `Native` nested deeper in a fallback
+/// tree, can't produce a false positive.
 fn assert_specialized(parser: &Parser) {
     let debug = format!("{parser:?}");
     assert!(
-        debug.contains("Native("),
+        debug.contains("ast: Native("),
         "expected a specialized (Native) parser, got: {debug}"
     );
 }
