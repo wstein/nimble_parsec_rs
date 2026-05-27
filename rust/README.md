@@ -31,8 +31,11 @@ Leaves (free functions):
 - `satisfy(label, pred)` — a character matching a predicate
 - `one_of(set)` / `none_of(set)` — a character in / not in a set
 - `take_while(pred)` / `take_while1(pred)` — a run of matching characters
-- `digits()` — one or more ASCII digits
+- `digits()` — one or more ASCII digits (as `&str`)
+- `integer()` — a run of digits parsed into an `i64`
 - `eof()` — end of input
+- `empty()` — always succeeds, consuming nothing
+- `eventually(p)` — skip input until `p` matches, then return its output
 - `choice(alts)` — the first matching alternative; `alts` is an array `[p; N]` (same type) or a tuple `(a, b, …)` up to arity 8 (different types, one `Output`)
 - `lookahead(p)` / `not(p)` — zero-width positive / negative assertions
 - `delimited(open, content, close)` — `content` between two delimiters
@@ -83,6 +86,23 @@ untrusted input through a debug build.
 
 [`DEFAULT_MAX_RECURSION_DEPTH`]: src/lib.rs
 [`Parser`]: src/typed.rs
+
+## Porting from Elixir
+
+The core uses idiomatic Rust names (`literal`, `.to`, `.repeated_in`, …). For a
+closer mapping to NimbleParsec, `nimble_parsec_rs::nimble` re-exposes the surface
+under NimbleParsec terminology as free functions:
+
+```rust
+use nimble_parsec_rs::nimble::*; // string, eos, concat, replace, duplicate, map, …
+
+let pair = concat(string("("), concat(integer(), string(")")));
+assert_eq!(pair.parse("(42)").unwrap(), ("(", (42, ")")));
+```
+
+`tag` / `unwrap_and_tag` / `reduce` / `wrap` are intentionally absent — in the
+typed API those are `.map` into your own type (or `.fold`); see
+[PARITY_MATRIX.md](../PARITY_MATRIX.md) for the full mapping.
 
 ## Design
 

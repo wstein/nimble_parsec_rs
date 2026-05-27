@@ -25,6 +25,19 @@ library, replacing the dynamic `Value`-based port.
   `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
   and empty for non-expectation failures (negative assertions, `try_map`
   rejections, the recursion cap).
+- Parity leaves/combinators carrying their NimbleParsec names: `integer()`
+  (a digit run parsed to `i64`, overflow-safe), `eventually(p)` (skip input until
+  `p` matches), and `empty()` (always succeeds, consumes nothing).
+- A dedicated `nimble` module (`nimble_parsec_rs::nimble`) of NimbleParsec
+  terminology as free functions, for readers porting from Elixir — `use
+  nimble_parsec_rs::nimble::*` gives the vocabulary in one import. Renames
+  (`string`/`eos`/`concat`/`replace`/`duplicate`) plus free-function forms of the
+  method-combinators (`optional`/`repeat`/`times`/`ignore`/`map`/`label`/
+  `lookahead_not`/`byte_offset`/`line`/`debug`/`post_traverse`/`pre_traverse`) and
+  re-exports of the already-matching names. `tag` / `unwrap_and_tag` / `reduce` /
+  `wrap` are intentionally **omitted** — in the typed API they are `.map` into a
+  typed value (or `.fold`); aliasing them would re-import the untyped term-list
+  model. The idiomatic core namespace is left uncluttered.
 - `.fold(init, f)`: repeat a parser, folding outputs into an accumulator
   (NimbleParsec's `reduce`) without the intermediate `Vec` that
   `.repeated().map(…)` allocates. (`tag`/`wrap`/`unwrap_and_tag` are intentionally

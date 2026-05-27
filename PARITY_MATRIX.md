@@ -7,6 +7,10 @@ is generic over each combinator's `Output`, so where NimbleParsec emits an
 untyped term list, the Rust API yields a concrete type — the "Notes" column flags
 where that changes the shape.
 
+Where the idiomatic Rust name differs from NimbleParsec's, the
+[`nimble_parsec_rs::nimble`](rust/src/typed.rs) module re-exposes it under the
+NimbleParsec name (a free function) for porters — those are flagged "(alias …)".
+
 Status legend:
 
 - ✅ **Ported** — a direct equivalent exists (naming/shape differences noted).
@@ -19,20 +23,20 @@ Status legend:
 
 | Elixir | Rust (typed) | Status | Notes |
 | --- | --- | --- | --- |
-| `string` | `literal` | ✅ | Yields the matched `&str`. |
+| `string` | `literal` (alias `string`) | ✅ | Yields the matched `&str`. |
 | `utf8_char` | `any` / `satisfy` | ✅ | Yields a `char`. `satisfy(label, pred)` for a class. |
 | `ascii_char` | `satisfy` / `one_of` / `none_of` | ✅ | Yields a `char`; predicates are plain closures, not a range list. |
 | `utf8_string` / `ascii_string` | `take_while` / `take_while1` | ✅ | Yields a `&str`. `take_while1` enforces a minimum of 1. |
-| `integer` | `digits().map(str::parse)` | 🧩 | `digits()` yields the `&str` run; `.map`/`.try_map` parses it into the integer type you want. |
-| `eos` | `eof` | ✅ | End-of-input assertion. |
-| `empty` | — | 🧩 | A parser that yields `()` without consuming; build with e.g. `not(eof()).ignored()`-style composition, or just omit. No dedicated leaf. |
+| `integer` | `integer()` | ✅ | A digit run parsed into `i64` (overflow → error). Use `digits().try_map(...)` for other widths or a sign. |
+| `eos` | `eof` (alias `eos`) | ✅ | End-of-input assertion. |
+| `empty` | `empty()` | ✅ | Always succeeds, consuming nothing; handy as a final `choice` branch. |
 | `bytes` | — | ❌ | The crate is `&str`-only for now (see roadmap: generic input). |
 
 ## Combination & control flow
 
 | Elixir | Rust (typed) | Status | Notes |
 | --- | --- | --- | --- |
-| `concat` | `.then` | ✅ | Yields a tuple `(A, B)`. `.ignore_then` / `.then_ignore` keep one side. |
+| `concat` | `.then` (alias `concat`) | ✅ | Yields a tuple `(A, B)`. `.ignore_then` / `.then_ignore` keep one side. |
 | `optional` | `.optional` | ✅ | Yields `Option<O>`. |
 | `choice` | `choice(alts)` / `.or` | ✅ | `alts` is an array `[p; N]` (same type) or a tuple `(a, b, …)` ≤ arity 8 (different types, one `Output`); `.or` chains two. Failures union the `expected` set and join reasons with `" or "`. |
 | `repeat` | `.repeated` | ✅ | Yields `Vec<O>`; a non-consuming match stops the loop. `.repeated_at_least(min)` for a floor. |
@@ -40,8 +44,8 @@ Status legend:
 | `lookahead` | `lookahead` | ✅ | Zero-width; yields the inner output without consuming. |
 | `lookahead_not` | `not` | ✅ | Zero-width negative assertion, yields `()`. |
 | `repeat_while` | `repeated_until(p, stop)` | ✅ | Repeats `p` until `stop` would match (the terminator is left unconsumed). For an arbitrary boolean predicate, compose with `not`/`lookahead`. |
-| `eventually` | `not(p).ignore_then(any()).repeated().ignore_then(p)` | 🧩 | Compose: skip until the inner parser matches. |
-| `duplicate` | `.repeated_in(n, n)` | 🧩 | Or chain `.then`; no dedicated combinator. |
+| `eventually` | `eventually(p)` | ✅ | Skips input one character at a time until `p` matches, returning its output. |
+| `duplicate` | `duplicate(p, n)` / `.repeated_in(n, n)` | ✅ | Exactly-`n` repetition; `duplicate` is the NimbleParsec-named alias. |
 
 ## Transformation & tagging
 

@@ -1226,6 +1226,119 @@ where
     RepeatedUntil { parser, end }
 }
 
+/// [`empty`].
+pub struct Empty;
+
+impl<'i> Parser<'i> for Empty {
+    type Output = ();
+    fn parse_next(&self, _input: &mut Input<'i>) -> PResult<'i, ()> {
+        Ok(())
+    }
+}
+
+impl Generate for Empty {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+/// Always succeeds without consuming input, yielding `()` (NimbleParsec's
+/// `empty`). Handy as an always-matching final branch of a `choice`.
+pub fn empty() -> Empty {
+    Empty
+}
+
+/// [`integer`].
+pub struct Integer;
+
+impl<'i> Parser<'i> for Integer {
+    type Output = i64;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, i64> {
+        let rest = input.rest;
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if end == 0 {
+            return Err(ParseFailure::expecting(
+                "expected an integer",
+                rest,
+                input.cursor,
+            ));
+        }
+        let digits = &rest[..end];
+        match digits.parse::<i64>() {
+            Ok(value) => {
+                input.bump(digits);
+                Ok(value)
+            }
+            Err(_) => Err(ParseFailure::rejected(
+                "integer out of range",
+                rest,
+                input.cursor,
+            )),
+        }
+    }
+}
+
+impl Generate for Integer {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        for _ in 0..1 + gen.below(3) {
+            out.push((b'0' + gen.below(10) as u8) as char);
+        }
+    }
+}
+
+/// Parses a run of one or more ASCII digits into an `i64` (NimbleParsec's
+/// `integer`), failing if the value overflows `i64`. For other widths or a sign,
+/// compose `digits().try_map(...)`.
+pub fn integer() -> Integer {
+    Integer
+}
+
+/// [`eventually`].
+pub struct Eventually<P> {
+    inner: P,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for Eventually<P> {
+    type Output = P::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+        loop {
+            let checkpoint = *input;
+            if let Ok(out) = self.inner.parse_next(input) {
+                return Ok(out);
+            }
+            *input = checkpoint;
+            // The inner parser didn't match here; skip one character and retry.
+            match input.rest.chars().next() {
+                Some(c) => {
+                    let rest = input.rest;
+                    input.bump(&rest[..c.len_utf8()]);
+                }
+                None => {
+                    return Err(ParseFailure::expecting(
+                        "expected the parser to eventually match",
+                        input.rest,
+                        input.cursor,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl<P: Generate> Generate for Eventually<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        // The match can come immediately (zero skipped prefix), which round-trips.
+        self.inner.generate_into(gen, out);
+    }
+}
+
+/// Skips input one character at a time until `parser` matches, returning its
+/// output (NimbleParsec's `eventually`). Fails if the end of input is reached
+/// first.
+pub fn eventually<'i, P: Parser<'i>>(parser: P) -> Eventually<P> {
+    Eventually { inner: parser }
+}
+
 // ── Recursion ──────────────────────────────────────────────────────────────
 
 /// A forward-declared, self-referential parser, enabling recursive grammars
@@ -1526,4 +1639,128 @@ impl<P> Generate for Lookahead<P> {
 
 impl<P> Generate for Not<P> {
     fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+/// NimbleParsec-terminology aliases over the idiomatic core, for readers porting
+/// from Elixir. Every item delegates to the core with no behavioral difference;
+/// `use nimble_parsec_rs::nimble::*;` gives the NimbleParsec vocabulary as free
+/// functions (the pipeline style ports closely).
+///
+/// Combinators that are methods in the core (`map`, `optional`, `repeat`, …) are
+/// offered here as free functions taking the parser first. A few NimbleParsec
+/// combinators are intentionally **absent** because aliasing them would re-import
+/// the untyped term-list model the typed surface removes: `tag` / `unwrap_and_tag`
+/// (use `map` into your own enum/struct), `reduce` (use [`fold`](super::Parser::fold)),
+/// and `wrap` (the output is already a typed value, not a flat list).
+pub mod nimble {
+    use super::{
+        eof, literal, not, Eof, Ignored, Labelled, Literal, Map, Not, Opt, PostTraverse,
+        PreTraverse, Repeated, Then, To, WithByteOffset, WithLine,
+    };
+
+    // Combinators whose core name already matches NimbleParsec are re-exported so
+    // one `use nimble::*` provides the whole vocabulary, including the `Parser`
+    // trait (needed in scope for the methods the wrappers return).
+    pub use super::{
+        any, choice, digits, empty, eventually, integer, lookahead, recursive, satisfy, take_while,
+        Parser,
+    };
+
+    /// NimbleParsec name for [`literal`](super::literal).
+    pub fn string(lit: &'static str) -> Literal {
+        literal(lit)
+    }
+
+    /// NimbleParsec name for [`eof`](super::eof).
+    pub fn eos() -> Eof {
+        eof()
+    }
+
+    /// NimbleParsec `concat` — sequence two parsers ([`Parser::then`]).
+    pub fn concat<'i, A: Parser<'i>, B: Parser<'i>>(first: A, second: B) -> Then<A, B> {
+        first.then(second)
+    }
+
+    /// NimbleParsec `optional` ([`Parser::optional`]).
+    pub fn optional<'i, P: Parser<'i>>(parser: P) -> Opt<P> {
+        parser.optional()
+    }
+
+    /// NimbleParsec `repeat` ([`Parser::repeated`]).
+    pub fn repeat<'i, P: Parser<'i>>(parser: P) -> Repeated<P> {
+        parser.repeated()
+    }
+
+    /// NimbleParsec `times` / `duplicate` — repeat exactly `n` times
+    /// ([`Parser::repeated_in`] with `min == max`).
+    pub fn times<'i, P: Parser<'i>>(parser: P, n: usize) -> Repeated<P> {
+        parser.repeated_in(n, n)
+    }
+
+    /// NimbleParsec `duplicate` — repeat exactly `n` times.
+    pub fn duplicate<'i, P: Parser<'i>>(parser: P, n: usize) -> Repeated<P> {
+        parser.repeated_in(n, n)
+    }
+
+    /// NimbleParsec `ignore` ([`Parser::ignored`]).
+    pub fn ignore<'i, P: Parser<'i>>(parser: P) -> Ignored<P> {
+        parser.ignored()
+    }
+
+    /// NimbleParsec `replace` ([`Parser::to`]).
+    pub fn replace<'i, P: Parser<'i>, V: Clone>(parser: P, value: V) -> To<P, V> {
+        parser.to(value)
+    }
+
+    /// NimbleParsec `map` ([`Parser::map`]).
+    pub fn map<'i, P, F, U>(parser: P, f: F) -> Map<P, F>
+    where
+        P: Parser<'i>,
+        F: Fn(P::Output) -> U,
+    {
+        parser.map(f)
+    }
+
+    /// NimbleParsec `label` ([`Parser::labelled`]).
+    pub fn label<'i, P: Parser<'i>>(parser: P, label: &'static str) -> Labelled<P> {
+        parser.labelled(label)
+    }
+
+    /// NimbleParsec `lookahead_not` ([`not`](super::not)).
+    pub fn lookahead_not<'i, P: Parser<'i>>(parser: P) -> Not<P> {
+        not(parser)
+    }
+
+    /// NimbleParsec `byte_offset` ([`Parser::with_byte_offset`]).
+    pub fn byte_offset<'i, P: Parser<'i>>(parser: P) -> WithByteOffset<P> {
+        parser.with_byte_offset()
+    }
+
+    /// NimbleParsec `line` ([`Parser::with_line`]).
+    pub fn line<'i, P: Parser<'i>>(parser: P) -> WithLine<P> {
+        parser.with_line()
+    }
+
+    /// NimbleParsec `debug` ([`Parser::debug`]).
+    pub fn debug<'i, P: Parser<'i>>(parser: P, label: &'static str) -> super::Debug<P> {
+        parser.debug(label)
+    }
+
+    /// NimbleParsec `post_traverse` ([`Parser::post_traverse`]).
+    pub fn post_traverse<'i, P, F, U>(parser: P, f: F) -> PostTraverse<P, F>
+    where
+        P: Parser<'i>,
+        F: Fn(P::Output, super::Cursor) -> Result<U, String>,
+    {
+        parser.post_traverse(f)
+    }
+
+    /// NimbleParsec `pre_traverse` ([`Parser::pre_traverse`]).
+    pub fn pre_traverse<'i, P, F, U>(parser: P, f: F) -> PreTraverse<P, F>
+    where
+        P: Parser<'i>,
+        F: Fn(P::Output, super::Cursor) -> Result<U, String>,
+    {
+        parser.pre_traverse(f)
+    }
 }
