@@ -49,6 +49,7 @@ Composition (methods on [`Parser`]):
 - `.or(p)` — ordered alternation
 - `.optional()` — `Option` of the output
 - `.repeated()` / `.repeated_at_least(min)` / `.repeated_in(min, max)` — `Vec` of outputs
+- `.fold(init, f)` — repeat, folding outputs into an accumulator (NimbleParsec's `reduce`, no intermediate `Vec`)
 - `.labelled(msg)` — override the failure message
 - `.with_byte_offset()` / `.with_line()` — pair the output with the trailing byte offset / `(line, line-start offset)` (NimbleParsec's `byte_offset` / `line`)
 - `.debug(label)` — trace the parser to stderr, passing the output through

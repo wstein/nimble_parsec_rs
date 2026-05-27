@@ -25,6 +25,10 @@ library, replacing the dynamic `Value`-based port.
   `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
   and empty for non-expectation failures (negative assertions, `try_map`
   rejections, the recursion cap).
+- `.fold(init, f)`: repeat a parser, folding outputs into an accumulator
+  (NimbleParsec's `reduce`) without the intermediate `Vec` that
+  `.repeated().map(…)` allocates. (`tag`/`wrap`/`unwrap_and_tag` are intentionally
+  not resugared — in the typed API they are ordinary `.map` into a typed value.)
 - Convenience combinators: `delimited(open, content, close)`,
   `separated_by` / `separated_by1` (separated lists, no trailing separator), and
   `repeated_until(p, end)` (repeat until a terminator, not consumed). `choice` now

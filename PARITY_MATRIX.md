@@ -52,9 +52,9 @@ Status legend:
 | `ignore` | `.ignored` | ✅ | Discards the output (yields `()`). |
 | `label` | `.labelled` | ✅ | Overrides the failure message and the structured `expected`. |
 | `post_traverse` / `pre_traverse` | `.post_traverse` / `.pre_traverse` | ✅ | Fallible transform with the end / start `Cursor`. Context is threaded by capturing `Cell`/`RefCell` state in the callback (idiomatic interior mutability; not auto-rolled-back on backtrack, as in winnow). `.try_map` is the position-free variant. |
-| `reduce` | `.repeated().map(fold)` | 🧩 | Fold the `Vec<O>` in a `.map`; no dedicated `reduce`. |
-| `tag` / `unwrap_and_tag` | `.map(\|o\| …)` | 🧩 | Tagging is just `.map` into a typed value/enum variant — the dynamic tag is unnecessary. |
-| `wrap` | `.map(\|o\| vec![o])` | 🧩 | The output is already typed; wrap with `.map` if a `Vec` is wanted. |
+| `reduce` | `.fold(init, f)` | ✅ | Folds a repetition into an accumulator without the intermediate `Vec`. |
+| `tag` / `unwrap_and_tag` | `.map(\|o\| …)` | ➖ | Deliberately not resugared: tagging is `.map` into a typed value/enum variant — a stringly-typed `.tagged(name)` would re-import the dynamic-term model the typed surface removes. |
+| `wrap` | `.map(\|o\| vec![o])` | ➖ | The output is already typed; wrap with `.map` if a `Vec` is wanted. |
 | `debug` | `.debug(label)` | ✅ | Traces the parser to stderr (entry position + outcome), passing the output through. |
 
 ## Position metadata

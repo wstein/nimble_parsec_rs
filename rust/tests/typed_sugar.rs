@@ -1,10 +1,20 @@
 //! Convenience combinators: `delimited`, `separated_by[1]`, `repeated_until`,
-//! and the tuple-arity `choice`.
+//! the tuple-arity `choice`, and `fold`.
 
 use nimble_parsec_rs::typed::{
-    any, choice, delimited, digits, generate, literal, repeated_until, separated_by, separated_by1,
-    Generate, Parser,
+    any, choice, delimited, digits, generate, literal, repeated_until, satisfy, separated_by,
+    separated_by1, Generate, Parser,
 };
+
+#[test]
+fn fold_accumulates_without_an_intermediate_vec() {
+    // Parse a base-10 number by folding digit characters into an accumulator.
+    let number = satisfy("a digit", |c: char| c.is_ascii_digit())
+        .fold(|| 0u64, |acc, c| acc * 10 + (c as u64 - '0' as u64));
+    assert_eq!(number.parse("01234").unwrap(), 1234);
+    // No digits → the seed value.
+    assert_eq!(number.parse("").unwrap(), 0);
+}
 
 #[test]
 fn delimited_keeps_only_the_content() {

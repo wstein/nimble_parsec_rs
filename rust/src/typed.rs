@@ -252,6 +252,22 @@ pub trait Parser<'i> {
         To { inner: self, value }
     }
 
+    /// Repeats `self` zero or more times, folding the outputs into an accumulator
+    /// seeded by `init` (NimbleParsec's `reduce`, done without the intermediate
+    /// `Vec` that `self.repeated().map(…)` would allocate).
+    fn fold<A, I, F>(self, init: I, f: F) -> Fold<Self, I, F>
+    where
+        Self: Sized,
+        I: Fn() -> A,
+        F: Fn(A, Self::Output) -> A,
+    {
+        Fold {
+            inner: self,
+            init,
+            f,
+        }
+    }
+
     /// Transforms the output with a fallible `f`; returning `Err(message)` fails
     /// the parse (NimbleParsec's validating `post_traverse`).
     fn try_map<U, F>(self, f: F) -> TryMap<Self, F>
@@ -510,6 +526,42 @@ impl<'i, P: Parser<'i>, V: Clone> Parser<'i> for To<P, V> {
     fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, V> {
         self.inner.parse_next(input)?;
         Ok(self.value.clone())
+    }
+}
+
+/// [`Parser::fold`].
+pub struct Fold<P, I, F> {
+    inner: P,
+    init: I,
+    f: F,
+}
+
+impl<'i, P, I, F, A> Parser<'i> for Fold<P, I, F>
+where
+    P: Parser<'i>,
+    I: Fn() -> A,
+    F: Fn(A, P::Output) -> A,
+{
+    type Output = A;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A> {
+        let mut acc = (self.init)();
+        loop {
+            let checkpoint = *input;
+            match self.inner.parse_next(input) {
+                Ok(item) => {
+                    if input.rest.len() == checkpoint.rest.len() {
+                        *input = checkpoint; // non-advancing match: stop, don't loop
+                        break;
+                    }
+                    acc = (self.f)(acc, item);
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+            }
+        }
+        Ok(acc)
     }
 }
 
@@ -1362,6 +1414,14 @@ impl<P: Generate, F> Generate for TryMap<P, F> {
 impl<P: Generate, V> Generate for To<P, V> {
     fn generate_into(&self, gen: &mut Gen, out: &mut String) {
         self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate, I, F> Generate for Fold<P, I, F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        for _ in 0..gen.below(3) {
+            self.inner.generate_into(gen, out);
+        }
     }
 }
 
