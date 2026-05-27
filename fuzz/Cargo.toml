@@ -1,0 +1,39 @@
+[package]
+name = "nimble_parsec_rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nimble_parsec_rs]
+path = "../rust"
+
+# Disable LTO for faster compile times during fuzzing; re-enable for production
+# crash triage with `cargo fuzz run --release`.
+[profile.release]
+debug = 1
+opt-level = 3
+lto = false
+
+[[bin]]
+name = "binary"
+path = "fuzz_targets/binary.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "str"
+path = "fuzz_targets/str.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tlv"
+path = "fuzz_targets/tlv.rs"
+test = false
+doc = false
