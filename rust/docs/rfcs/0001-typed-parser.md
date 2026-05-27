@@ -116,11 +116,13 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
    the compiler, so the codegen layer is unnecessary. `compile_parser!` /
    `defparsec!` (and the `parsec_macro` crate) are removed in the cutover (phase 6)
    rather than ported; named parsers become plain `fn … -> impl Parser`.
-5. **Consumer migration.** ✅ Expressiveness proven in
-   [`rust/tests/typed_grammar.rs`](../../tests/typed_grammar.rs) — Stem's template
-   lexer rebuilt on the typed API, yielding a typed token `enum` with no `Value`.
-   The live `np_lexer` / `np_expr` swap happens in the Stem repo behind its
-   differential gate (`compile_diff` / `verify` / `fuzz`).
+5. **Consumer migration.** ✅ The reference grammars
+   [`Stem/np_lexer.rs`](../../../Stem/np_lexer.rs) and
+   [`Stem/np_expr.rs`](../../../Stem/np_expr.rs) are rewritten on the typed API
+   (against the Elixir `Stem/parser.ex`); their patterns are compiled and exercised
+   in [`rust/tests/typed_stem_patterns.rs`](../../tests/typed_stem_patterns.rs)
+   (with [`typed_grammar.rs`](../../tests/typed_grammar.rs)). The live swap lands in
+   the Stem repo behind its differential gate (`compile_diff` / `verify` / `fuzz`).
 6. **Remove `Value`-based API → `1.0`.** ✅ Done. The dynamic `Value`/`Ast`
    interpreter, the `parsec_macro` crate, `generate`, and the benchmark are
    removed; `typed` is promoted to the crate root and the crate has zero runtime
