@@ -26,6 +26,7 @@
 //! | `&str` | `char` | `&str` | Text; full newline/column tracking |
 //! | `&[u8]` | `u8` | `&[u8]` | Binary; via the `&[T]` blanket impl |
 //! | `&[T]` | `T` | `&[T]` | Any `Copy + PartialEq + Debug` token |
+//! | `Bits<S>` | `bool` | `BitSlice<S::Slice>` | Sub-byte bit stream, MSB-first |
 //! | `Partial<S>` | same as `S` | same as `S` | Streaming/incomplete-input |
 //!
 //! For a two-phase lexer→parser pipeline, pass the lexer's `Vec<MyToken>`
@@ -287,6 +288,139 @@ impl<S: Stream> Stream for Partial<S> {
 
     fn preview(self, max_tokens: usize) -> String {
         self.0.preview(max_tokens)
+    }
+}
+
+// ── Bits<S> — sub-byte bit stream ────────────────────────────────────────────
+
+/// A borrowed sub-byte slice within a [`Bits`] stream. This is the `Slice`
+/// type produced by [`Stream::split_at`] on a `Bits<S>`.
+///
+/// Bit order is MSB-first: `start_bit = 0` means the most-significant bit of
+/// the first byte; `start_bit = 7` means the least-significant bit.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct BitSlice<Sl: Copy + PartialEq + core::fmt::Debug> {
+    /// The underlying byte data covering this bit range.
+    pub bytes: Sl,
+    /// Bit offset within the first byte (0 = MSB, 7 = LSB).
+    pub start_bit: u8,
+    /// Number of bits in this slice.
+    pub len_bits: usize,
+}
+
+/// A bit-level view over any byte stream `S: Stream<Token = u8>`.
+///
+/// Wraps the byte stream and exposes individual bits as `Token = bool` (MSB
+/// first within each byte). Use [`typed::bits`](crate::typed::bits) to enter a
+/// bit context and [`typed::byte_aligned`](crate::typed::byte_aligned) to exit
+/// cleanly on a byte boundary.
+///
+/// # Bit ordering
+/// Within each byte, bit 0 is the **most-significant** bit (same convention as
+/// nom's `bits` combinator). So for a byte `0b1010_0011`:
+/// - bit 0 → `true`  (MSB)
+/// - bit 1 → `false`
+/// - bit 7 → `true`  (LSB)
+///
+/// # Streaming
+/// `Bits<Partial<&[u8]>>` works automatically: [`StreamIsPartial::PARTIAL`] is
+/// delegated to the inner stream.
+#[derive(Copy, Clone, Debug)]
+pub struct Bits<S: Stream<Token = u8>> {
+    pub(crate) inner: S,
+    /// Current bit offset within the leading byte (0 = MSB, 7 = LSB).
+    pub(crate) bit_offset: u8,
+}
+
+impl<S: Stream<Token = u8>> Bits<S> {
+    /// Wraps `inner`, starting at the MSB of the first byte.
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            bit_offset: 0,
+        }
+    }
+
+    /// Current bit offset within the leading byte (0 = MSB of the first
+    /// byte, 7 = LSB). A value of 0 means the stream is on a byte boundary.
+    pub fn bit_offset(&self) -> u8 {
+        self.bit_offset
+    }
+
+    /// The underlying byte stream.
+    pub fn inner(&self) -> S {
+        self.inner
+    }
+}
+
+impl<S: Stream<Token = u8>> StreamIsPartial for Bits<S> {
+    const PARTIAL: bool = S::PARTIAL;
+}
+
+impl<S: Stream<Token = u8>> Stream for Bits<S> {
+    /// Each token is a single bit (`true` = 1, `false` = 0).
+    type Token = bool;
+    /// A sub-range of a bit stream.
+    type Slice = BitSlice<S::Slice>;
+
+    fn first(self) -> Option<(bool, usize)> {
+        let (byte, _) = self.inner.first()?;
+        let bit = (byte >> (7 - self.bit_offset)) & 1 != 0;
+        Some((bit, 1))
+    }
+
+    fn split_at(self, n_bits: usize) -> (BitSlice<S::Slice>, Self) {
+        let total = self.bit_offset as usize + n_bits;
+        let bytes_advance = total / 8;
+        let new_bit_offset = (total % 8) as u8;
+        // Bytes physically spanned by these bits (includes the partial byte).
+        let bytes_covered = bytes_advance + (new_bit_offset > 0) as usize;
+
+        let (consumed_bytes, _) = self.inner.split_at(bytes_covered);
+        let (_, rest_inner) = self.inner.split_at(bytes_advance);
+
+        let slice = BitSlice {
+            bytes: consumed_bytes,
+            start_bit: self.bit_offset,
+            len_bits: n_bits,
+        };
+        let rest = Bits {
+            inner: rest_inner,
+            bit_offset: new_bit_offset,
+        };
+        (slice, rest)
+    }
+
+    fn as_slice(self) -> BitSlice<S::Slice> {
+        BitSlice {
+            bytes: self.inner.as_slice(),
+            start_bit: self.bit_offset,
+            len_bits: self.len(),
+        }
+    }
+
+    fn len(self) -> usize {
+        self.inner.len() * 8 - self.bit_offset as usize
+    }
+
+    /// Inside a [`typed::bits`](crate::typed::bits) context,
+    /// `cursor.byte_offset` is repurposed to count **bits** consumed (not
+    /// bytes). [`BitsOf`](crate::typed::BitsOf) reads this count on exit and
+    /// converts it back to a byte advance on the outer stream.
+    fn advance_cursor(self, cursor: Cursor, n: usize) -> Cursor {
+        Cursor {
+            byte_offset: cursor.byte_offset + n,
+            ..cursor
+        }
+    }
+
+    fn preview(self, max_tokens: usize) -> String {
+        let n = self.len().min(max_tokens);
+        format!("bits[{} of {} available]", n, self.len())
+    }
+
+    fn is_valid_split(self, n: usize) -> bool {
+        n <= self.len()
     }
 }
 
