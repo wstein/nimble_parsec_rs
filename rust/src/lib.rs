@@ -20,6 +20,7 @@
 //! ```
 #![deny(missing_docs)]
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::{Add, Neg, RangeInclusive};
 use std::sync::{Arc, OnceLock};
@@ -392,10 +393,30 @@ impl Parser {
     }
 
     /// Runs the parser from an explicit `cursor` and `context`, threading both
-    /// through the parse. Most callers want [`Parser::parse`].
+    /// through the parse, with the default recursion cap
+    /// ([`DEFAULT_MAX_RECURSION_DEPTH`]). Most callers want [`Parser::parse`].
     pub fn run<'a>(&self, input: &'a str, cursor: Cursor, context: Context) -> ParseResult<'a> {
+        self.run_with_max_depth(input, cursor, context, DEFAULT_MAX_RECURSION_DEPTH)
+    }
+
+    /// Like [`Parser::run`], but caps recursion depth at `max_depth` (the number
+    /// of [`recursive`]/[`ParserRef`] crossings on a single path) instead of the
+    /// default. Use a lower bound to harden against deeply nested untrusted
+    /// input, or a higher one for legitimately deep grammars.
+    pub fn run_with_max_depth<'a>(
+        &self,
+        input: &'a str,
+        cursor: Cursor,
+        context: Context,
+        max_depth: usize,
+    ) -> ParseResult<'a> {
         let mut tokens = Vec::new();
-        let tail = run_ast(&self.ast, input, cursor, context, true, &mut tokens)?;
+        // Set the budget for this parse and restore the previous one on return,
+        // so a `parse` invoked from within a transform closure is re-entrant.
+        let previous = RECURSION_BUDGET.with(|b| b.replace(max_depth));
+        let result = run_ast(&self.ast, input, cursor, context, true, &mut tokens);
+        RECURSION_BUDGET.with(|b| b.set(previous));
+        let tail = result?;
         Ok(ParseSuccess {
             tokens,
             rest: tail.rest,
@@ -404,9 +425,16 @@ impl Parser {
         })
     }
 
-    /// Parses `input` from the start (default cursor, empty context).
+    /// Parses `input` from the start (default cursor, empty context) with the
+    /// default recursion cap ([`DEFAULT_MAX_RECURSION_DEPTH`]).
     pub fn parse<'a>(&self, input: &'a str) -> ParseResult<'a> {
         self.run(input, Cursor::default(), Context::new())
+    }
+
+    /// Like [`Parser::parse`], but caps recursion depth at `max_depth` instead
+    /// of the default — the parse-time analogue of [`generate_with`].
+    pub fn parse_with_max_depth<'a>(&self, input: &'a str, max_depth: usize) -> ParseResult<'a> {
+        self.run_with_max_depth(input, Cursor::default(), Context::new(), max_depth)
     }
 }
 
@@ -512,9 +540,7 @@ impl ParserRef {
     /// Returns a parser that resolves to the referenced definition at parse
     /// time. Panics if run before [`ParserRef::define`].
     pub fn parser(&self) -> Parser {
-        Parser {
-            ast: Arc::new(Ast::Reference(Arc::clone(&self.cell))),
-        }
+        Parser::from_ast(Ast::Reference(Arc::clone(&self.cell)))
     }
 
     /// Supplies the referenced definition. Must be called exactly once.
@@ -1026,6 +1052,31 @@ pub mod __private {
     pub fn advance_cursor(cursor: Cursor, consumed: &str) -> Cursor {
         advance(cursor, consumed)
     }
+}
+
+/// Default cap on parser recursion depth (the number of [`recursive`] /
+/// [`ParserRef`] crossings on a single parse path). Reaching it yields a
+/// [`ParseFailure`] rather than overflowing the native call stack on
+/// pathologically nested input.
+///
+/// Sized for release builds on a 2 MiB thread stack (the tokio-worker default),
+/// where each level costs well under 1 KiB and 256 levels leaves a comfortable
+/// margin, while far exceeding any realistic grammar nesting. Note that *debug*
+/// builds have much larger stack frames, so a debug parse of input nested
+/// hundreds deep may exhaust the stack before the cap; tune down via
+/// [`Parser::parse_with_max_depth`] / [`Parser::run_with_max_depth`] if you run
+/// untrusted input through a debug build, and up for legitimately deep grammars.
+pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 256;
+
+thread_local! {
+    // Remaining recursion budget for the parse running on this thread. Set at
+    // the start of each `run`/`run_with_max_depth` and restored on return (so
+    // nested `parse` calls from inside a transform closure are re-entrancy
+    // safe). Only `Ast::Reference` spends from it: that is the sole node where
+    // *input* drives unbounded recursion — `repeat`/`eventually` are iterative
+    // loops, and `choice`/`concat` only recurse to the static (build-time) AST
+    // depth, which is bounded by the grammar, not the attacker's input.
+    static RECURSION_BUDGET: Cell<usize> = const { Cell::new(DEFAULT_MAX_RECURSION_DEPTH) };
 }
 
 /// Where a successful parse stopped: the unconsumed input, position, and
@@ -1641,7 +1692,23 @@ fn run_ast<'a>(
             let inner = cell
                 .get()
                 .expect("parsec reference used before it was defined");
-            run_ast(inner, input, cursor, context, emit, out)
+            // Spend one unit of recursion budget per reference crossing. At zero,
+            // fail gracefully instead of recursing until the native stack
+            // overflows (an uncatchable abort) on deeply nested input.
+            let budget = RECURSION_BUDGET.with(Cell::get);
+            if budget == 0 {
+                return Err(ParseFailure {
+                    reason: "maximum recursion depth exceeded".to_string(),
+                    rest: input,
+                    cursor,
+                });
+            }
+            RECURSION_BUDGET.with(|b| b.set(budget - 1));
+            let result = run_ast(inner, input, cursor, context, emit, out);
+            // Restore on the way out so sibling branches (e.g. the alternatives
+            // of an enclosing `choice`) see the full budget, not a drained one.
+            RECURSION_BUDGET.with(|b| b.set(budget));
+            result
         }
 
         Ast::Native(f) => {
