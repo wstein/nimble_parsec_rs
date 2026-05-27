@@ -59,6 +59,12 @@ Error messages follow NimbleParsec's phrasing (e.g. `expected ASCII character in
 the range "0" to "9"`), but exact `inspect` escaping of non-printable codepoints
 and `integer`'s composite "followed by" message are not byte-identical.
 
+A `ParseFailure` carries both the human-readable `reason` and a structured
+`expected: Vec<String>` — the token/character-class descriptions the parser was
+looking for, unioned across `choice` alternatives. It is empty for failures that
+are not simple expectations (negative assertions, semantic `post_traverse`
+rejections, or the recursion cap). The `cursor` carries line and byte offset.
+
 ## Why this split
 
 NimbleParsec's main advantage is compile-time generation into highly optimized BEAM clauses.
@@ -82,14 +88,12 @@ larger frames, so lower the cap if you run untrusted input through a debug build
 Acknowledged, scheduled work — not accidents:
 
 - **Typed `Parser<T>` surface (1.0).** Make combinators generic over their output
-  type (à la nom/winnow/chumsky), retiring the dynamic `Value` enum.
-- **Structured errors.** `ParseFailure::reason` is currently a freeform string;
-  expose a typed "expected set" carrying position + alternatives.
-- **Property tests + fuzz corpus.** Seed property tests from the existing
-  `generate` facility, complementing the deterministic per-combinator tests.
-- **crates.io publication.** Fill in Cargo.toml metadata
-  (`repository`/`keywords`/`categories`/`readme`) and publish `parsec_macro`
-  separately — deferred until there is a second consumer beyond Stem.
+  type (à la nom/winnow/chumsky), retiring the dynamic `Value` enum. See the
+  design note in [`docs/rfcs/0001-typed-parser.md`](docs/rfcs/0001-typed-parser.md).
+- **Fuzz corpus.** Complement the property tests with a persisted fuzz corpus
+  (e.g. `cargo-fuzz`) seeded from the existing `generate` facility.
+- **crates.io publication.** Publish `parsec_macro` as its own crate (the
+  metadata is in place) — deferred until there is a second consumer beyond Stem.
 
 ## Run tests
 
