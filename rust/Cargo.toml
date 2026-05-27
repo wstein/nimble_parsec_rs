@@ -2,8 +2,14 @@
 name = "nimble_parsec_rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 license = "Apache-2.0"
-description = "Phase-1 Rust port of NimbleParsec combinators"
+description = "A runtime + codegen Rust port of a subset of NimbleParsec's parser combinators"
+repository = "https://github.com/wstein/nimble_parsec_rs"
+homepage = "https://github.com/wstein/nimble_parsec_rs"
+readme = "README.md"
+keywords = ["parser", "combinator", "parsing", "nimble-parsec", "tokenizer"]
+categories = ["parser-implementations", "text-processing"]
 
 [lib]
 name = "nimble_parsec_rs"
@@ -16,6 +22,7 @@ rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1"
 
 [[bench]]
 name = "parser_bench"
