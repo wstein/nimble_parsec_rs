@@ -16,7 +16,7 @@
 
 use nimble_parsec_rs::typed::{
     any, choice, digits, empty, eof, eventually, generate, literal, lookahead, not, repeated_until,
-    satisfy, Parser,
+    rest, satisfy, Parser,
 };
 
 // ── AnyChar ───────────────────────────────────────────────────────────────────
@@ -345,5 +345,18 @@ fn generate_eventually_emits_inner_directly() {
     let p = eventually(literal("TARGET"));
     let input = generate(&p, 0);
     assert_eq!(input, "TARGET");
+    p.parse(input.as_str()).unwrap();
+}
+
+// ── Rest ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn generate_rest_yields_empty_string() {
+    // `Rest<S>::generate_into` is a no-op (empty body).  Wrapping it in a
+    // sequence verifies the body is reachable and produces no characters.
+    let p = literal("x").then_ignore(rest());
+    let input = generate(&p, 0);
+    // literal("x") generates "x"; rest() contributes nothing.
+    assert_eq!(input, "x");
     p.parse(input.as_str()).unwrap();
 }
