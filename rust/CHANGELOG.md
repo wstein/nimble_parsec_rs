@@ -16,6 +16,8 @@ public API (the ~31 combinators, the fluent `Parser` methods, and the `Value` /
   `labelled`, leaves (`literal`/`any`/`satisfy`/`take_while`/`digits`/`eof`), and a
   boxed `recursive`. Reuses the structured `ParseFailure` and the recursion cap;
   lives beside the `Value` API during the migration to a typed surface.
+  Phase 3 adds `to`, `try_map`, `lookahead`, `not`, `one_of`, `none_of`, bounded
+  `repeated_in`, and n-way `choice`.
 - Structured parse errors: `ParseFailure` now carries an `expected: Vec<String>`
   alongside `reason` — the token/character-class descriptions the parser was
   looking for, unioned across `choice` alternatives, and empty for non-expectation

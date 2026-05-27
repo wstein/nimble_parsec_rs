@@ -108,10 +108,14 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
    `recursive` that reuses the structured `ParseFailure` and the recursion cap.
    Tested in [`rust/tests/typed.rs`](../../tests/typed.rs); lives beside the
    existing API.
-3. **Combinator parity.** Port the remaining ~25 combinators to the typed surface,
-   reaching feature parity with the `Value` API; port the differential fixtures.
-4. **Codegen.** Re-target the proc-macro to emit typed combinators; re-type
-   `__private`.
+3. **Combinator parity.** ✅ Done (core set). Added `to`, `try_map`, `lookahead`,
+   `not`, `one_of`, `none_of`, bounded `repeated_in`, and n-way `choice` on top of
+   the phase-2 core — enough to express the lexer/expression grammars.
+4. **Codegen — retire, don't re-target.** The macro existed to claw back the
+   runtime interpreter's overhead; typed combinators are already monomorphized by
+   the compiler, so the codegen layer is unnecessary. `compile_parser!` /
+   `defparsec!` (and the `parsec_macro` crate) are removed in the cutover (phase 6)
+   rather than ported; named parsers become plain `fn … -> impl Parser`.
 5. **Consumer migration.** Move Stem's `np_lexer` / `np_expr` to the typed API
    behind the existing differential gate (`compile_diff` / `verify` / `fuzz`).
 6. **Remove `Value`-based API → `1.0`.** Delete the dynamic surface once no

@@ -192,6 +192,7 @@ pub trait Parser<'i> {
         Repeated {
             inner: self,
             min: 0,
+            max: None,
         }
     }
 
@@ -200,7 +201,42 @@ pub trait Parser<'i> {
     where
         Self: Sized,
     {
-        Repeated { inner: self, min }
+        Repeated {
+            inner: self,
+            min,
+            max: None,
+        }
+    }
+
+    /// Repeats `self` between `min` and `max` times (inclusive), collecting the
+    /// outputs.
+    fn repeated_in(self, min: usize, max: usize) -> Repeated<Self>
+    where
+        Self: Sized,
+    {
+        Repeated {
+            inner: self,
+            min,
+            max: Some(max),
+        }
+    }
+
+    /// Replaces the output with a clone of `value` (NimbleParsec's `replace`).
+    fn to<V: Clone>(self, value: V) -> To<Self, V>
+    where
+        Self: Sized,
+    {
+        To { inner: self, value }
+    }
+
+    /// Transforms the output with a fallible `f`; returning `Err(message)` fails
+    /// the parse (NimbleParsec's validating `post_traverse`).
+    fn try_map<U, F>(self, f: F) -> TryMap<Self, F>
+    where
+        Self: Sized,
+        F: Fn(Self::Output) -> Result<U, String>,
+    {
+        TryMap { inner: self, f }
     }
 
     /// Overrides the failure message (and the structured expectation) with `label`.
@@ -346,10 +382,11 @@ impl<'i, P: Parser<'i>> Parser<'i> for Opt<P> {
     }
 }
 
-/// [`Parser::repeated`] / [`Parser::repeated_at_least`].
+/// [`Parser::repeated`] / [`Parser::repeated_at_least`] / [`Parser::repeated_in`].
 pub struct Repeated<P> {
     inner: P,
     min: usize,
+    max: Option<usize>,
 }
 
 impl<'i, P: Parser<'i>> Parser<'i> for Repeated<P> {
@@ -357,6 +394,9 @@ impl<'i, P: Parser<'i>> Parser<'i> for Repeated<P> {
     fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<P::Output>> {
         let mut out = Vec::new();
         loop {
+            if self.max.is_some_and(|max| out.len() >= max) {
+                break;
+            }
             let start = *input;
             match self.inner.parse_next(input) {
                 Ok(item) => {
@@ -378,6 +418,89 @@ impl<'i, P: Parser<'i>> Parser<'i> for Repeated<P> {
         }
         Ok(out)
     }
+}
+
+/// [`Parser::to`].
+pub struct To<P, V> {
+    inner: P,
+    value: V,
+}
+
+impl<'i, P: Parser<'i>, V: Clone> Parser<'i> for To<P, V> {
+    type Output = V;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, V> {
+        self.inner.parse_next(input)?;
+        Ok(self.value.clone())
+    }
+}
+
+/// [`Parser::try_map`].
+pub struct TryMap<P, F> {
+    inner: P,
+    f: F,
+}
+
+impl<'i, P, F, U> Parser<'i> for TryMap<P, F>
+where
+    P: Parser<'i>,
+    F: Fn(P::Output) -> Result<U, String>,
+{
+    type Output = U;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+        let out = self.inner.parse_next(input)?;
+        (self.f)(out).map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
+    }
+}
+
+/// [`lookahead`].
+pub struct Lookahead<P> {
+    inner: P,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for Lookahead<P> {
+    type Output = P::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+        // Zero-width: run the inner parser, then restore the input position.
+        let start = *input;
+        let out = self.inner.parse_next(input);
+        *input = start;
+        out
+    }
+}
+
+/// Succeeds with `parser`'s output **without consuming input** (positive
+/// lookahead), or fails if `parser` fails.
+pub fn lookahead<'i, P: Parser<'i>>(parser: P) -> Lookahead<P> {
+    Lookahead { inner: parser }
+}
+
+/// [`not`].
+pub struct Not<P> {
+    inner: P,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for Not<P> {
+    type Output = ();
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, ()> {
+        let start = *input;
+        let matched = self.inner.parse_next(input).is_ok();
+        *input = start;
+        if matched {
+            Err(ParseFailure::rejected(
+                "did not expect the lookahead parser to match",
+                start.rest,
+                start.cursor,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Succeeds (consuming nothing) only if `parser` fails — negative lookahead, the
+/// typed analogue of `lookahead_not`.
+pub fn not<'i, P: Parser<'i>>(parser: P) -> Not<P> {
+    Not { inner: parser }
 }
 
 /// [`Parser::labelled`].
@@ -549,6 +672,59 @@ impl<'i> Parser<'i> for Eof {
 /// Matches only at the end of input.
 pub fn eof() -> Eof {
     Eof
+}
+
+/// Matches a single character contained in `set`.
+pub fn one_of(set: &'static str) -> Satisfy<impl Fn(char) -> bool> {
+    satisfy("one of an expected set", move |c| set.contains(c))
+}
+
+/// Matches a single character **not** contained in `set`.
+pub fn none_of(set: &'static str) -> Satisfy<impl Fn(char) -> bool> {
+    satisfy("a character outside an excluded set", move |c| {
+        !set.contains(c)
+    })
+}
+
+/// [`choice`].
+pub struct Choice<P, const N: usize> {
+    parsers: [P; N],
+}
+
+impl<'i, P: Parser<'i>, const N: usize> Parser<'i> for Choice<P, N> {
+    type Output = P::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+        let start = *input;
+        let mut reasons = Vec::with_capacity(N);
+        let mut expected = Vec::new();
+        for parser in &self.parsers {
+            match parser.parse_next(input) {
+                Ok(out) => return Ok(out),
+                Err(err) => {
+                    *input = start;
+                    reasons.push(err.reason);
+                    expected.extend(err.expected);
+                }
+            }
+        }
+        Err(ParseFailure {
+            reason: if reasons.is_empty() {
+                "choice has no options".to_string()
+            } else {
+                reasons.join(" or ")
+            },
+            expected,
+            rest: start.rest,
+            cursor: start.cursor,
+        })
+    }
+}
+
+/// Tries each parser in order, returning the first success. All alternatives
+/// share one type and `Output`; for differently-typed branches, chain
+/// [`Parser::or`] instead.
+pub fn choice<P, const N: usize>(parsers: [P; N]) -> Choice<P, N> {
+    Choice { parsers }
 }
 
 // ── Recursion ──────────────────────────────────────────────────────────────

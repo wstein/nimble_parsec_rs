@@ -1,7 +1,8 @@
 //! Tests for the typed `Parser<Output>` core (RFC 0001, phase 2).
 
 use nimble_parsec_rs::typed::{
-    any, digits, eof, literal, recursive, satisfy, take_while, take_while1, Parser,
+    any, choice, digits, eof, literal, lookahead, none_of, not, one_of, recursive, satisfy,
+    take_while, take_while1, Parser,
 };
 
 #[test]
@@ -117,6 +118,72 @@ fn labelled_overrides_the_failure_message() {
         .unwrap_err();
     assert_eq!(err.reason, "a tag opener");
     assert_eq!(err.expected, vec!["a tag opener".to_string()]);
+}
+
+#[test]
+fn to_replaces_the_output_with_a_constant() {
+    #[derive(Debug, PartialEq, Clone)]
+    enum Op {
+        And,
+        Or,
+    }
+    let op = literal("&&").to(Op::And).or(literal("||").to(Op::Or));
+    assert_eq!(op.parse("&&").unwrap(), Op::And);
+    assert_eq!(op.parse("||").unwrap(), Op::Or);
+}
+
+#[test]
+fn try_map_can_fail_the_parse() {
+    // Parse digits, then reject values that don't fit the domain.
+    let byte = digits().try_map(|d: &str| {
+        d.parse::<u16>()
+            .ok()
+            .filter(|&n| n <= 255)
+            .ok_or_else(|| format!("{d} is out of range"))
+    });
+    assert_eq!(byte.parse("200").unwrap(), 200);
+    let err = byte.parse("999").unwrap_err();
+    assert_eq!(err.reason, "999 is out of range");
+    assert!(err.expected.is_empty());
+}
+
+#[test]
+fn lookahead_and_not_are_zero_width() {
+    // `lookahead` peeks without consuming.
+    let peek = lookahead(literal("ab")).then(literal("a"));
+    assert_eq!(peek.parse_partial("abc").unwrap(), (("ab", "a"), "bc"));
+
+    // `not` succeeds only when the inner parser would fail, consuming nothing.
+    let not_close = not(literal("}}")).ignore_then(any());
+    assert_eq!(not_close.parse("x").unwrap(), 'x');
+    assert!(not_close.parse("}}").is_err());
+}
+
+#[test]
+fn one_of_none_of_and_choice() {
+    assert_eq!(one_of("+-*/").parse("*").unwrap(), '*');
+    assert!(one_of("+-*/").parse("x").is_err());
+    assert_eq!(none_of(" \t").parse("a").unwrap(), 'a');
+    assert!(none_of(" \t").parse(" ").is_err());
+
+    // n-way choice over homogeneous alternatives.
+    let kw = choice([literal("if"), literal("else"), literal("while")]);
+    assert_eq!(kw.parse("else").unwrap(), "else");
+    assert_eq!(kw.parse("while").unwrap(), "while");
+    let err = kw.parse("for").unwrap_err();
+    assert_eq!(
+        err.reason,
+        "expected \"if\" or expected \"else\" or expected \"while\""
+    );
+}
+
+#[test]
+fn bounded_repetition() {
+    let p = literal("a").repeated_in(2, 3);
+    assert!(p.parse("a").is_err()); // below min
+    assert_eq!(p.parse("aa").unwrap().len(), 2);
+    // stops at max, leaving the rest
+    assert_eq!(p.parse_partial("aaaa").unwrap(), (vec!["a", "a", "a"], "a"));
 }
 
 // A balanced-parenthesis grammar that returns its nesting depth, exercising the
