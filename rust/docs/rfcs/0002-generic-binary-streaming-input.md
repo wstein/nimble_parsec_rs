@@ -254,7 +254,7 @@ cursor; keep that guarantee and avoid a second axis of generics.
 | `satisfy(pred)` / `one_of` / `none_of` | `pred: Fn(S::Token)->bool` |
 | `take_while` / `take_while1` | `Fn(S::Token)->bool`, yields `S::Slice` |
 | `literal(lit)` | via `Compare`; `&str` lit on str streams, `&[u8]` lit on byte streams; yields `S::Slice` |
-| `bytes(n)` → rename `take(n)` | takes `n` base units, yields `S::Slice`; **no char-boundary rejection** on `&[u8]` (the failure path at `typed.rs:1349` disappears) |
+| `bytes(n)` | retained as a thin alias of the new `take(n)` (below); on `&[u8]` it gains validity for any `n` — the char-boundary rejection at `typed.rs:1349` disappears |
 | `eof()` | unchanged (already generic) |
 | `eventually` | skips one _token_ at a time |
 | every threading combinator | only the `'i`→`S` signature change; bodies unchanged |
@@ -266,7 +266,7 @@ cursor; keep that guarantee and avoid a second axis of generics.
 | `byte(b)` / `one_of_bytes` / `byte_range` | byte-level analogues of `satisfy`/`one_of` (parity with Elixir `ascii_char` ranges) |
 | `utf8_char(ranges)` | decode one UTF-8 codepoint from a **byte** stream (Elixir parity) — the bridge that lets text grammars run on `&[u8]` |
 | `be_u16/u32/u64`, `le_u16/u32/u64`, signed, `be_f32/f64`, `le_*` | fixed-width numeric parsers (nom/winnow `binary` parity) |
-| `take(n)` | n base units (the generalized `bytes`) |
+| `take(n)` | n base units — the general primitive that subsumes `bytes`, which stays as an alias (`pub fn bytes(n) -> Take { take(n) }`) |
 | `length_take` / `length_value` | dynamic length prefix (today only expressible via `flat_map` — keep `flat_map`, add the idiomatic combinator) |
 | `rest()` | yield all remaining input as `S::Slice` |
 | `Partial<S>` + `Needed` | the streaming wrapper + error variant |
@@ -287,7 +287,8 @@ trait lands.
   for &str` as the sole impl. Behavior identical; this is the big mechanical
   refactor (C1–C12). Migrate tests/examples for the signature change.
 - **Phase 2 — `impl Stream for &[u8]` + byte leaves.** `byte`, `take(n)`,
-  `be_*`/`le_*`, `rest`. `bytes(n)` becomes `take(n)`; boundary check deleted.
+  `be_*`/`le_*`, `rest`. Add `take(n)` as the general primitive and keep
+  `bytes(n)` as a thin alias of it; the char-boundary check is dropped on `&[u8]`.
 - **Phase 3 — `utf8_char` + `ascii_char` ranges.** Text-on-bytes bridge; Elixir
   parity for `utf8_char`/`ascii_char`.
 - **Phase 4 — Streaming.** `Partial<S>`, `StreamIsPartial`, `Needed`,
@@ -306,8 +307,8 @@ the _type signatures_ of parsers you name explicitly, not in their behavior.
 ### TL;DR by how you use the crate
 
 - **You only compose provided combinators and call `.parse("…")`** → near-zero
-  changes. The `&str` argument pins `S = &str`, inference fills the rest. Apply the
-  `bytes` → `take` rename (below) and you are done.
+  changes. The `&str` argument pins `S = &str`, inference fills the rest. Nothing
+  to rename — `bytes(n)` keeps working as an alias of the new `take(n)`.
 - **You wrote functions that _return_ parsers with a named lifetime** → swap the
   lifetime bound for a stream bound (or pin to `&str`). See §"Functions that
   return parsers".
@@ -319,7 +320,7 @@ the _type signatures_ of parsers you name explicitly, not in their behavior.
 
 | Before (`&str`-only) | After (generic) | Note |
 |---|---|---|
-| `bytes(n)` | `take(n)` | Same behavior on `&str` (counts bytes, still errors off a char boundary); the name now also fits `&[u8]`, where any `n` is valid. |
+| `bytes(n)` | `bytes(n)` _or_ `take(n)` | No change required — `bytes` is now an alias of `take`. Same behavior on `&str` (counts bytes, still errors off a char boundary); `take` reads better and also fits `&[u8]`, where any `n` is valid. |
 | `fn p<'i>() -> impl Parser<'i>` | `fn p<S: Stream>() -> impl Parser<S>` | Or pin: `fn p<'i>() -> impl Parser<&'i str>` to migrate incrementally. |
 | `impl<'i> Parser<'i> for X` | `impl<S: Stream> Parser<S> for X` | Or pin: `impl<'i> Parser<&'i str> for X`. See below. |
 | `ParseFailure<'a>` in your signatures | `ParseFailure<&'a str>` | The struct gained a stream parameter; for text it is `&str`, so fields (`reason`, `expected`, `rest`, `cursor`) are unchanged. |
@@ -407,9 +408,10 @@ assert_eq!(paren_number().parse("(42)").unwrap(), 42);  // call site unchanged
 
 The only edit is the return type's lifetime bound `Parser<'i, …>` →
 `Parser<&'i str, …>`. The body and the call site are identical. Migration is
-therefore a find-and-replace over parser-returning function signatures plus the
-`bytes` → `take` rename; deeper changes are needed only if you maintain custom
-`Parser`/`Generate` impls or want a grammar to run on bytes.
+therefore a find-and-replace over parser-returning function signatures — no
+combinator renames, since `bytes` stays as an alias of `take`; deeper changes are
+needed only if you maintain custom `Parser`/`Generate` impls or want a grammar to
+run on bytes.
 
 ## Alternatives considered, rated
 
