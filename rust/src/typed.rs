@@ -1422,13 +1422,11 @@ where
     type Output = char;
     fn parse_next(&self, input: &mut Input<S>) -> PResult<S, char> {
         match input.stream.first() {
-            None => {
-                incomplete_or_err(
-                    "expected UTF-8 character",
-                    input.stream.as_slice(),
-                    input.cursor,
-                )
-            }
+            None => incomplete_or_err(
+                "expected UTF-8 character",
+                input.stream.as_slice(),
+                input.cursor,
+            ),
             Some((first_byte, _)) => {
                 let seq_len: usize = match first_byte {
                     0x00..=0x7F => 1,
@@ -1482,7 +1480,7 @@ impl<S: Stream, P: Parser<S, Output = usize>> Parser<S> for LengthTake<P> {
         let n = self.prefix.parse_next(input)?;
         if input.stream.len() < n {
             return incomplete_or_err(
-                &format!("expected {} base units after length prefix", n),
+                &format!("expected {} bytes after length prefix", n),
                 input.stream.as_slice(),
                 input.cursor,
             );
