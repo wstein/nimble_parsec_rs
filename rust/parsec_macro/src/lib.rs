@@ -156,11 +156,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
 
         "eos" if args.is_empty() => Some(quote! {
             if !__input.is_empty() {
-                return Err(::nimble_parsec_rs::ParseFailure {
-                    reason: "expected end of string".to_string(),
-                    rest: __input,
-                    cursor: __cursor,
-                });
+                return Err(::nimble_parsec_rs::ParseFailure::expecting("expected end of string".to_string(), __input, __cursor));
             }
         }),
 
@@ -171,11 +167,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 Some(quote! {{
                     let __lit: &'static str = #lit;
                     if !__input.starts_with(__lit) {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: ::std::format!("expected string {:?}", __lit),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting(::std::format!("expected string {:?}", __lit), __input, __cursor));
                     }
                     __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, __lit);
                     __input = &__input[__lit.len()..];
@@ -190,11 +182,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                             __input = __rest;
                         }
                         None => {
-                            return Err(::nimble_parsec_rs::ParseFailure {
-                                reason: ::std::format!("expected string {:?}", __lit),
-                                rest: __input,
-                                cursor: __cursor,
-                            });
+                            return Err(::nimble_parsec_rs::ParseFailure::expecting(::std::format!("expected string {:?}", __lit), __input, __cursor));
                         }
                     }
                 }})
@@ -213,11 +201,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                         if __raw[__i].is_ascii_digit() { __i += 1; } else { break; }
                     }
                     if __i < __n {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: "expected integer".to_string(),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting("expected integer".to_string(), __input, __cursor));
                     }
                     __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, &__input[..__n]);
                     __input = &__input[__n..];
@@ -231,11 +215,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                         if __raw[__i].is_ascii_digit() { __i += 1; } else { break; }
                     }
                     if __i < __n {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: "expected integer".to_string(),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting("expected integer".to_string(), __input, __cursor));
                     }
                     let __consumed = &__input[..__n];
                     __tokens.push(::nimble_parsec_rs::Value::Int(
@@ -257,11 +237,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     let mut __i = 0usize;
                     while __i < __raw.len() && __raw[__i].is_ascii_digit() { __i += 1; }
                     if __i < __min {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: "expected integer".to_string(),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting("expected integer".to_string(), __input, __cursor));
                     }
                     __cursor = ::nimble_parsec_rs::__private::advance_cursor(__cursor, &__input[..__i]);
                     __input = &__input[__i..];
@@ -273,11 +249,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     let mut __i = 0usize;
                     while __i < __raw.len() && __raw[__i].is_ascii_digit() { __i += 1; }
                     if __i < __min {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: "expected integer".to_string(),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting("expected integer".to_string(), __input, __cursor));
                     }
                     let __consumed = &__input[..__i];
                     __tokens.push(::nimble_parsec_rs::Value::Int(
@@ -314,11 +286,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     if __raw[__i].is_ascii_digit() { __i += 1; } else { break; }
                 }
                 if __i < __min {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "expected integer".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("expected integer".to_string(), __input, __cursor));
                 }
                 let __consumed = &__input[..__i];
                 #push
@@ -346,11 +314,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                         __input = &__input[__count..];
                     }
                     ::std::option::Option::None => {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: ::std::format!("expected {} bytes", __count),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting(::std::format!("expected {} bytes", __count), __input, __cursor));
                     }
                 }
             }})
@@ -389,11 +353,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                         __input = &__input[1..];
                     }
                     _ => {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: ::nimble_parsec_rs::__private::ascii_char_reason(#reason_preds),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting(::nimble_parsec_rs::__private::ascii_char_reason(#reason_preds), __input, __cursor));
                     }
                 }
             }})
@@ -422,11 +382,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                         __input = &__input[__c.len_utf8()..];
                     }
                     _ => {
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: ::nimble_parsec_rs::__private::utf8_char_reason(#reason_preds),
-                            rest: __input,
-                            cursor: __cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting(::nimble_parsec_rs::__private::utf8_char_reason(#reason_preds), __input, __cursor));
                     }
                 }
             }})
@@ -461,11 +417,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     __taken += 1;
                 }
                 if __taken < __min {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "expected ascii string with minimum length".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("expected ascii string with minimum length".to_string(), __input, __cursor));
                 }
                 let __consumed = &__input[..__i];
                 #push
@@ -501,11 +453,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     __taken += 1;
                 }
                 if __taken < __min {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "expected utf8 string with minimum length".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("expected utf8 string with minimum length".to_string(), __input, __cursor));
                 }
                 let __consumed = &__input[..__consumed_end];
                 #push
@@ -566,11 +514,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                 let mut __choice_done = false;
                 #(#attempts)*
                 if !__choice_done {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: __choice_reasons.join(" or "),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting(__choice_reasons.join(" or "), __input, __cursor));
                 }
             }})
         }
@@ -625,14 +569,14 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     __tokens.split_off(__start);
                 let __name: ::std::sync::Arc<str> = (#name).into();
                 if __drained.len() != 1 {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: ::std::format!(
+                    return Err(::nimble_parsec_rs::ParseFailure::rejected(
+                        ::std::format!(
                             "expected exactly one token to unwrap_and_tag as \"{}\"",
                             __name
                         ),
-                        rest: __pre_input,
-                        cursor: __pre_cursor,
-                    });
+                        __pre_input,
+                        __pre_cursor,
+                    ));
                 }
                 #finish
             }})
@@ -850,11 +794,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     }
                 }
                 if __count < __min {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "repeat did not reach minimum repetitions".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("repeat did not reach minimum repetitions".to_string(), __input, __cursor));
                 }
             }})
         }
@@ -914,11 +854,11 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                             __input = &__input[__ch.len_utf8()..];
                         }
                         ::std::option::Option::None => {
-                            return Err(::nimble_parsec_rs::ParseFailure {
-                                reason: "expected combinator to eventually match".to_string(),
-                                rest: __ev_input,
-                                cursor: __ev_cursor,
-                            });
+                            return Err(::nimble_parsec_rs::ParseFailure::expecting(
+                                "expected combinator to eventually match".to_string(),
+                                __ev_input,
+                                __ev_cursor,
+                            ));
                         }
                     }
                 }
@@ -982,11 +922,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     }
                 }
                 if __count < __min {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "repeat_while did not reach minimum repetitions".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("repeat_while did not reach minimum repetitions".to_string(), __input, __cursor));
                 }
             }})
         }
@@ -1021,11 +957,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     ) {
                         Ok(__x) => __x,
                         Err(__reason) => {
-                            return Err(::nimble_parsec_rs::ParseFailure {
-                                reason: __reason,
-                                rest: __input,
-                                cursor: __cursor,
-                            });
+                            return Err(::nimble_parsec_rs::ParseFailure::expecting(__reason, __input, __cursor));
                         }
                     };
                 __context = __new_context;
@@ -1067,11 +999,11 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     }
                     Err(__e) => {
                         let __lbl: ::std::sync::Arc<str> = (#label).into();
-                        return Err(::nimble_parsec_rs::ParseFailure {
-                            reason: ::std::format!("expected {}", __lbl),
-                            rest: __e.rest,
-                            cursor: __e.cursor,
-                        });
+                        return Err(::nimble_parsec_rs::ParseFailure::expecting(
+                            ::std::format!("expected {}", __lbl),
+                            __e.rest,
+                            __e.cursor,
+                        ));
                     }
                 }
             }})
@@ -1130,11 +1062,7 @@ fn codegen_impl(expr: &Expr, ignored: bool) -> Option<TokenStream2> {
                     })
                 })();
                 if __r.is_ok() {
-                    return Err(::nimble_parsec_rs::ParseFailure {
-                        reason: "did not expect lookahead parser to match".to_string(),
-                        rest: __input,
-                        cursor: __cursor,
-                    });
+                    return Err(::nimble_parsec_rs::ParseFailure::expecting("did not expect lookahead parser to match".to_string(), __input, __cursor));
                 }
             }})
         }

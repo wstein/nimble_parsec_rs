@@ -81,16 +81,18 @@ The public surface is ~31 combinators plus types and the 5 macros — including 
 The earlier draft's elaborate debate is dropped: it argued against a crate that, on inspection, mostly does not exist (no codegen, no tests, no benchmark, no line/col — all false). The real, verified picture is small:
 
 - **One safety blocker — recursion depth.** ✅ Fixed (§2.4) with a regression test.
-- **Rust CI.** ✅ Added a `cargo test` + `clippy -D warnings` + `cargo bench --no-run` job to [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (it previously ran Elixir only, leaving the 110 Rust tests unguarded).
-- **Truth-in-naming.** A one-line README note: a runtime **+ codegen** port of a _subset_ of NimbleParsec, not the full compile-time `defparsec` macro.
-- **Tag & repin.** Cut `v0.1.0`; repin Stem's dependency off `branch = develop` onto the tag.
+- **Rust CI.** ✅ Added a `cargo test` + `clippy -D warnings` + `cargo bench --no-run` job to [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (it previously ran Elixir only, leaving the Rust tests unguarded).
+- **Property tests.** ✅ Added a `proptest` suite ([`rust/tests/properties.rs`](../rust/tests/properties.rs)) covering totality/monotonicity, the `generate` round-trip, and recursion safety.
+- **Structured errors.** ✅ `ParseFailure` now carries a structured `expected: Vec<String>` alongside `reason`, unioned across `choice` branches (the original review's "strong should").
+- **Publication metadata.** ✅ Cargo.toml `repository`/`keywords`/`categories`/`readme` + a `1.70` MSRV; a `CHANGELOG.md` states the 0.x semver policy.
+- **Truth-in-naming.** ✅ A README note: a runtime **+ codegen** port of a _subset_ of NimbleParsec, not the full compile-time `defparsec` macro.
+- **Tag & repin.** ⏳ Cut `v0.1.0`; repin Stem's dependency off `branch = develop` onto the tag.
 
 ### Deferred to roadmap (acknowledged, scheduled — not accidents)
 
-- Typed `Parser<T>` redesign (1.0 goal — erases the dynamic `Value` debt, §2.2).
-- Structured "expected-set" errors on `ParseFailure` (today `reason` is a freeform string; `choice` joins alternatives with `" or "`).
-- Property tests + a fuzz corpus (seedable via the existing `generate` facility).
-- Full crates.io publication ceremony (Cargo.toml `repository`/`keywords`/`categories`/`readme`, publishing `parsec_macro` separately) — only when a second consumer is real. The near-term release is an **internal tag**.
+- Typed `Parser<T>` redesign (1.0 goal — erases the dynamic `Value` debt, §2.2). A design RFC is being drafted as the first phase.
+- A persisted fuzz corpus (`cargo-fuzz`) to complement the property tests.
+- Publishing `parsec_macro` as its own crate (metadata is now in place) — only when a second consumer beyond Stem is real. The near-term release is an **internal tag**.
 
 ---
 

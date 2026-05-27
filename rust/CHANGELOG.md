@@ -10,6 +10,11 @@ public API (the ~31 combinators, the fluent `Parser` methods, and the `Value` /
 
 ### Added
 
+- Structured parse errors: `ParseFailure` now carries an `expected: Vec<String>`
+  alongside `reason` — the token/character-class descriptions the parser was
+  looking for, unioned across `choice` alternatives, and empty for non-expectation
+  failures (negative assertions, semantic rejections, the recursion cap). New
+  `ParseFailure::expecting` / `ParseFailure::rejected` constructors.
 - Recursion-depth cap on the interpreter: deeply nested input now returns a
   `ParseFailure` ("maximum recursion depth exceeded") instead of overflowing the
   native call stack. Configurable per parse via `Parser::parse_with_max_depth` /

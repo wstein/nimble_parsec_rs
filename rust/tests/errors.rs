@@ -1,5 +1,6 @@
 use nimble_parsec_rs::{
-    ascii_char, choice, label, string, utf8_char, AsciiPredicate, Utf8Predicate, Value,
+    ascii_char, choice, label, lookahead_not, string, utf8_char, AsciiPredicate, Utf8Predicate,
+    Value,
 };
 
 #[test]
@@ -62,6 +63,38 @@ fn parse_failure_displays_and_is_a_std_error() {
     // Usable through the std error trait object.
     let boxed: Box<dyn std::error::Error> = Box::new(err);
     assert!(boxed.to_string().contains("expected string"));
+}
+
+#[test]
+fn expecting_failures_carry_a_structured_expected_set() {
+    let err = string("foo").parse("bar").expect_err("should fail");
+    // A leaf expectation seeds the structured set with its own descriptor.
+    assert_eq!(err.expected, vec![err.reason.clone()]);
+    assert!(err.reason.starts_with("expected string"));
+}
+
+#[test]
+fn choice_unions_the_expected_sets_of_its_branches() {
+    let parser = choice(vec![
+        label(string("foo"), "a foo"),
+        label(string("bar"), "a bar"),
+    ]);
+    let err = parser.parse("xyz").expect_err("all branches should fail");
+    assert_eq!(
+        err.expected,
+        vec!["expected a foo".to_string(), "expected a bar".to_string()]
+    );
+}
+
+#[test]
+fn negative_assertions_have_an_empty_expected_set() {
+    // `lookahead_not` matching is a rejection, not a token expectation, so it
+    // carries a reason but no `expected` entries.
+    let err = lookahead_not(string("x"))
+        .parse("xyz")
+        .expect_err("should reject");
+    assert!(err.expected.is_empty());
+    assert_eq!(err.reason, "did not expect lookahead parser to match");
 }
 
 #[test]

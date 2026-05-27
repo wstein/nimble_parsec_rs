@@ -221,12 +221,48 @@ pub struct ParseSuccess<'a> {
 /// A failed parse: why it failed and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseFailure<'a> {
-    /// Human-readable failure message.
+    /// Human-readable failure message. For a `choice` this is the alternatives'
+    /// messages joined with `" or "`; it always renders [`expected`](Self::expected)
+    /// when that set is non-empty.
     pub reason: String,
+    /// The token or character-class descriptions the parser was looking for at
+    /// [`cursor`](Self::cursor), aggregated across `choice` alternatives (e.g.
+    /// `["expected string \"a\"", "expected integer"]`). Empty for failures that
+    /// are not simple expectations — negative assertions (`lookahead_not`),
+    /// semantic rejections (`post_traverse`), or structural limits (the recursion
+    /// cap).
+    pub expected: Vec<String>,
     /// The input at the point of failure.
     pub rest: &'a str,
     /// Position at the point of failure.
     pub cursor: Cursor,
+}
+
+impl<'a> ParseFailure<'a> {
+    /// Builds a failure where the parser expected a specific token or character
+    /// class. `what` (e.g. `expected string "x"`) becomes both the [`reason`](Self::reason)
+    /// and the single entry of the [`expected`](Self::expected) set.
+    pub fn expecting(what: impl Into<String>, rest: &'a str, cursor: Cursor) -> Self {
+        let what = what.into();
+        ParseFailure {
+            reason: what.clone(),
+            expected: vec![what],
+            rest,
+            cursor,
+        }
+    }
+
+    /// Builds a failure that is not a simple token expectation — a negative
+    /// assertion, a semantic/validation rejection, or a structural limit. Its
+    /// [`expected`](Self::expected) set is empty.
+    pub fn rejected(reason: impl Into<String>, rest: &'a str, cursor: Cursor) -> Self {
+        ParseFailure {
+            reason: reason.into(),
+            expected: Vec::new(),
+            rest,
+            cursor,
+        }
+    }
 }
 
 impl std::fmt::Display for ParseFailure<'_> {
@@ -1111,11 +1147,7 @@ fn run_ast<'a>(
             context,
         }),
 
-        Ast::Fail(reason) => Err(ParseFailure {
-            reason: (*reason).to_string(),
-            rest: input,
-            cursor,
-        }),
+        Ast::Fail(reason) => Err(ParseFailure::rejected((*reason).to_string(), input, cursor)),
 
         Ast::Str { lit, reason } => {
             if let Some(rest) = input.strip_prefix(lit.as_ref()) {
@@ -1128,28 +1160,16 @@ fn run_ast<'a>(
                     context,
                 })
             } else {
-                Err(ParseFailure {
-                    reason: reason.clone(),
-                    rest: input,
-                    cursor,
-                })
+                Err(ParseFailure::expecting(reason.clone(), input, cursor))
             }
         }
 
         Ast::AsciiChar { predicates, reason } => {
             let Some(&b) = input.as_bytes().first() else {
-                return Err(ParseFailure {
-                    reason: reason.clone(),
-                    rest: input,
-                    cursor,
-                });
+                return Err(ParseFailure::expecting(reason.clone(), input, cursor));
             };
             if b > 0x7f || !matches(b, predicates) {
-                return Err(ParseFailure {
-                    reason: reason.clone(),
-                    rest: input,
-                    cursor,
-                });
+                return Err(ParseFailure::expecting(reason.clone(), input, cursor));
             }
             let consumed = &input[..1];
             if emit {
@@ -1164,18 +1184,10 @@ fn run_ast<'a>(
 
         Ast::Utf8Char { predicates, reason } => {
             let Some(ch) = input.chars().next() else {
-                return Err(ParseFailure {
-                    reason: reason.clone(),
-                    rest: input,
-                    cursor,
-                });
+                return Err(ParseFailure::expecting(reason.clone(), input, cursor));
             };
             if !matches(ch, predicates) {
-                return Err(ParseFailure {
-                    reason: reason.clone(),
-                    rest: input,
-                    cursor,
-                });
+                return Err(ParseFailure::expecting(reason.clone(), input, cursor));
             }
             let consumed = &input[..ch.len_utf8()];
             if emit {
@@ -1208,11 +1220,11 @@ fn run_ast<'a>(
                 taken += 1;
             }
             if taken < *min {
-                return Err(ParseFailure {
-                    reason: "expected utf8 string with minimum length".to_string(),
-                    rest: input,
+                return Err(ParseFailure::expecting(
+                    "expected utf8 string with minimum length".to_string(),
+                    input,
                     cursor,
-                });
+                ));
             }
             let consumed = &input[..consumed_end];
             if emit {
@@ -1247,11 +1259,11 @@ fn run_ast<'a>(
                 taken += 1;
             }
             if taken < *min {
-                return Err(ParseFailure {
-                    reason: "expected ascii string with minimum length".to_string(),
-                    rest: input,
+                return Err(ParseFailure::expecting(
+                    "expected ascii string with minimum length".to_string(),
+                    input,
                     cursor,
-                });
+                ));
             }
             let consumed = &input[..i];
             if emit {
@@ -1275,11 +1287,11 @@ fn run_ast<'a>(
                     context,
                 })
             }
-            None => Err(ParseFailure {
-                reason: format!("expected {count} bytes"),
-                rest: input,
+            None => Err(ParseFailure::expecting(
+                format!("expected {count} bytes"),
+                input,
                 cursor,
-            }),
+            )),
         },
 
         Ast::Eos => {
@@ -1290,11 +1302,11 @@ fn run_ast<'a>(
                     context,
                 })
             } else {
-                Err(ParseFailure {
-                    reason: "expected end of string".to_string(),
-                    rest: input,
+                Err(ParseFailure::expecting(
+                    "expected end of string".to_string(),
+                    input,
                     cursor,
-                })
+                ))
             }
         }
 
@@ -1314,11 +1326,11 @@ fn run_ast<'a>(
                 }
             }
             if i < *min {
-                return Err(ParseFailure {
-                    reason: "expected integer".to_string(),
-                    rest: input,
+                return Err(ParseFailure::expecting(
+                    "expected integer".to_string(),
+                    input,
                     cursor,
-                });
+                ));
             }
             let consumed = &input[..i];
             if emit {
@@ -1371,22 +1383,29 @@ fn run_ast<'a>(
         Ast::Choice(choices) => {
             let start = out.len();
             let mut reasons = Vec::with_capacity(choices.len());
+            let mut expected = Vec::new();
             for choice in choices {
                 match run_ast(choice, input, cursor, context.clone(), emit, out) {
                     Ok(tail) => return Ok(tail),
                     Err(err) => {
                         out.truncate(start);
                         reasons.push(err.reason);
+                        expected.extend(err.expected);
                     }
                 }
             }
-            let reason = if reasons.is_empty() {
-                "choice has no options".to_string()
-            } else {
-                reasons.join(" or ")
-            };
+            if reasons.is_empty() {
+                return Err(ParseFailure::rejected(
+                    "choice has no options",
+                    input,
+                    cursor,
+                ));
+            }
+            // Keep the joined reason for the message and the union of the
+            // branches' expectations as the structured set.
             Err(ParseFailure {
-                reason,
+                reason: reasons.join(" or "),
+                expected,
                 rest: input,
                 cursor,
             })
@@ -1439,11 +1458,11 @@ fn run_ast<'a>(
                         rest = &rest[ch.len_utf8()..];
                     }
                     None => {
-                        return Err(ParseFailure {
-                            reason: "expected combinator to eventually match".to_string(),
-                            rest: input,
+                        return Err(ParseFailure::expecting(
+                            "expected combinator to eventually match".to_string(),
+                            input,
                             cursor,
-                        });
+                        ));
                     }
                 }
             }
@@ -1467,11 +1486,11 @@ fn run_ast<'a>(
             let matched = run_ast(inner, input, cursor, context.clone(), false, out).is_ok();
             out.truncate(start);
             if matched {
-                Err(ParseFailure {
-                    reason: "did not expect lookahead parser to match".to_string(),
-                    rest: input,
+                Err(ParseFailure::rejected(
+                    "did not expect lookahead parser to match",
+                    input,
                     cursor,
-                })
+                ))
             } else {
                 Ok(Tail {
                     rest: input,
@@ -1544,11 +1563,11 @@ fn run_ast<'a>(
             let tail = run_ast(inner, input, cursor, context, true, out)?;
             let mut drained = out.split_off(start);
             if drained.len() != 1 {
-                return Err(ParseFailure {
-                    reason: format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
-                    rest: input,
+                return Err(ParseFailure::rejected(
+                    format!("expected exactly one token to unwrap_and_tag as \"{name}\""),
+                    input,
                     cursor,
-                });
+                ));
             }
             let value = drained.pop().expect("length checked above");
             if emit {
@@ -1580,10 +1599,9 @@ fn run_ast<'a>(
         }
 
         Ast::Label(inner, lbl) => {
-            run_ast(inner, input, cursor, context, emit, out).map_err(|err| ParseFailure {
-                reason: format!("expected {lbl}"),
-                rest: err.rest,
-                cursor: err.cursor,
+            // The label replaces the inner expectation set with itself.
+            run_ast(inner, input, cursor, context, emit, out).map_err(|err| {
+                ParseFailure::expecting(format!("expected {lbl}"), err.rest, err.cursor)
             })
         }
 
@@ -1651,11 +1669,7 @@ fn run_ast<'a>(
                         context,
                     })
                 }
-                Err(reason) => Err(ParseFailure {
-                    reason,
-                    rest,
-                    cursor: end,
-                }),
+                Err(reason) => Err(ParseFailure::rejected(reason, rest, end)),
             }
         }
 
@@ -1680,11 +1694,7 @@ fn run_ast<'a>(
                         context,
                     })
                 }
-                Err(reason) => Err(ParseFailure {
-                    reason,
-                    rest,
-                    cursor: end,
-                }),
+                Err(reason) => Err(ParseFailure::rejected(reason, rest, end)),
             }
         }
 
@@ -1697,11 +1707,11 @@ fn run_ast<'a>(
             // overflows (an uncatchable abort) on deeply nested input.
             let budget = RECURSION_BUDGET.with(Cell::get);
             if budget == 0 {
-                return Err(ParseFailure {
-                    reason: "maximum recursion depth exceeded".to_string(),
-                    rest: input,
+                return Err(ParseFailure::rejected(
+                    "maximum recursion depth exceeded",
+                    input,
                     cursor,
-                });
+                ));
             }
             RECURSION_BUDGET.with(|b| b.set(budget - 1));
             let result = run_ast(inner, input, cursor, context, emit, out);
@@ -1792,11 +1802,7 @@ fn run_repetition<'a>(
     }
 
     if count < min {
-        return Err(ParseFailure {
-            reason: too_few_reason.to_string(),
-            rest,
-            cursor: cur,
-        });
+        return Err(ParseFailure::expecting(too_few_reason, rest, cur));
     }
 
     Ok(Tail {
