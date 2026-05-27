@@ -1,127 +1,98 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// NOTE (historical): this reference example uses the pre-rewrite, `Value`-based
-// `nimble_parsec_rs` API, which has since been replaced by the typed
-// `Parser<Output>` surface (see `rust/docs/rfcs/0001-typed-parser.md`). The typed
-// idioms it would now use are demonstrated in `rust/tests/typed_grammar.rs`.
-//
 // Expression top-level tokenizer — a `nimble_parsec_rs` port of the
 // `Stem.Expression` grammar (the BEAM's NimbleParsec `paren_chunk` /
-// `top_level_text_part`). It splits a tag's inner text into top-level `Tok`s
-// (text runs plus the `|` / `||` / `&&` / `,` / `=` / `:` / whitespace
-// separators), treating quoted strings, parenthesised sub-expressions, and
-// bracketed literal keys as atomic — so separators inside them are part of the
-// text, not delimiters. The downstream structural parser is unchanged; this
-// only replaces the hand-written `scan_top_level` scanner.
+// `top_level_text_part`; see `Stem/parser.ex` for the sibling lexer). Built on
+// the crate's **typed** `Parser<Output>` API: each combinator yields a typed
+// value, so `top` produces a `Vec<Tok>` directly with no `Value` tagging or
+// post-parse decode.
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// Read alongside `np_lexer.rs`: together the two files are a worked example of
-// `nimble_parsec_rs`. Where the lexer leans on `post_traverse` and `tag`, this
-// file is the home of the crate's *recursion* support — `recursive` builds the
-// self-referential `paren` grammar that the lexer never needs. It also shows the
-// binary `.or` (sugar for a two-way `choice`), `.optional`, and `Utf8Predicate`.
+// It splits a tag's inner text into top-level `Tok`s (text runs plus the
+// `|` / `||` / `&&` / `,` / `=` / `:` / whitespace separators), treating quoted
+// strings, parenthesised sub-expressions, and bracketed literal keys as atomic —
+// so separators inside them are part of the text, not delimiters.
 //
-// Combinators demonstrated here (see `np_lexer.rs` for the full coverage map):
-//   recursive / ParserRef     — the balanced-paren grammar refers to itself
-//   choice / `.or`            — ordered alternation (n-way and the 2-way sugar)
-//   optional (`.optional`)    — tolerate a missing closing delimiter
-//   lookahead_not             — "any char that doesn't start an atomic chunk"
-//   repeat (`.repeated`)      — maximal runs
-//   concat (`.then`), ignore (`.ignored`), reduce (`.reduce`), tag (`.tagged`)
-//   utf8_char + Utf8Predicate — the whitespace class
+// NimbleParsec terminology is kept where the crate offers it
+// (`nimble_parsec_rs::nimble`): `string` / `choice` / `lookahead_not` / `repeat`
+// / `recursive`. The typed leaves/methods fill the rest: `utf8_char([])` → `any`,
+// the whitespace class → `one_of`, `reduce(to_string)` → `.map`, and `tag(..)` is
+// unnecessary because the output is already a typed `Tok`.
 
-use nimble_parsec_rs::{
-    choice, lookahead_not, recursive, string, utf8_char, Parser, Utf8Predicate, Value,
-};
+use nimble_parsec_rs::nimble::{any, choice, lookahead_not, recursive, repeat, string, Parser};
+use nimble_parsec_rs::typed::one_of;
 
 use crate::Tok;
 
-// Concatenate a combinator's emitted values (literal `string` parts as-is,
-// `utf8_char` codepoints as their char) back into the matched source text — the
-// `reduce` callback that turns an atomic chunk into one `Value::Str`.
-fn values_to_string(tokens: Vec<Value>) -> Value {
-    let mut text = String::new();
-    for value in tokens {
-        match value {
-            Value::Str(part) => text.push_str(&part),
-            Value::Int(codepoint) => {
-                if let Some(c) = codepoint
-                    .to_string()
-                    .parse::<u32>()
-                    .ok()
-                    .and_then(char::from_u32)
-                {
-                    text.push(c);
-                }
-            }
-            _ => {}
-        }
-    }
-    Value::Str(text)
-}
-
 // A double/single-quoted chunk: the delimiter, a run where `\` escapes the next
-// char, then the closing delimiter (tolerated-optional, like the BEAM). Atomic.
-// The inner two-way alternation is written with the fluent `.or` (a `choice` of
-// exactly two); `.optional` makes the closing delimiter forgiving.
-fn quoted(delim: &'static str) -> Parser {
+// char, then the closing delimiter (tolerated-optional, like the BEAM). Atomic;
+// reduced back to its raw source `String` (the backslash escapes are preserved).
+fn quoted<'i>(delim: &'static str) -> impl Parser<'i, Output = String> {
+    let content = choice((
+        string("\\")
+            .then(any())
+            .map(|(bs, c): (&str, char)| format!("{bs}{c}")),
+        lookahead_not(string(delim))
+            .ignore_then(any())
+            .map(|c| c.to_string()),
+    ));
     string(delim)
-        .then(
-            string("\\")
-                .then(utf8_char(vec![]))
-                .or(lookahead_not(string(delim)).then(utf8_char(vec![])))
-                .repeated(0, None),
-        )
+        .then(content.repeated())
         .then(string(delim).optional())
-        .reduce(values_to_string)
+        .map(join_chunk)
 }
 
 // A bracketed literal key `[ ... ]`: content runs to the first `]`, no nesting
 // or escapes. Atomic.
-fn bracket() -> Parser {
+fn bracket<'i>() -> impl Parser<'i, Output = String> {
     string("[")
         .then(
             lookahead_not(string("]"))
-                .then(utf8_char(vec![]))
-                .repeated(0, None),
+                .ignore_then(any())
+                .map(|c| c.to_string())
+                .repeated(),
         )
         .then(string("]").optional())
-        .reduce(values_to_string)
+        .map(join_chunk)
+}
+
+// Reassembles `(opener, inner fragments, optional closer)` into the chunk's raw
+// source — the typed form of `reduce({List, :to_string, []})`.
+fn join_chunk((head, close): ((&str, Vec<String>), Option<&str>)) -> String {
+    let (open, parts) = head;
+    let mut source = String::from(open);
+    parts.iter().for_each(|part| source.push_str(part));
+    source.push_str(close.unwrap_or(""));
+    source
 }
 
 // A parenthesised sub-expression: balanced parens with nested quotes/brackets,
-// reduced to its raw source. `recursive` hands the closure a handle to the
-// parser being defined, so `paren` can appear inside its own body — mirroring
+// reduced to its raw source. `recursive` hands the closure a handle to the parser
+// being defined, so `paren` can appear inside its own body — mirroring
 // `Stem.Expression.paren_chunk`. (Recursion depth is bounded by the crate; see
 // `Parser::parse_with_max_depth`.)
-fn paren() -> Parser {
+fn paren<'i>() -> impl Parser<'i, Output = String> {
     recursive(|paren| {
+        // Any char that doesn't open/close a paren or start a quote.
+        let other_char = lookahead_not(choice([
+            string("("),
+            string(")"),
+            string("\""),
+            string("'"),
+        ]))
+        .ignore_then(any())
+        .map(|c| c.to_string());
+
         string("(")
-            .then(
-                choice(vec![
-                    paren,
-                    quoted("\""),
-                    quoted("'"),
-                    bracket(),
-                    lookahead_not(choice(vec![
-                        string("("),
-                        string(")"),
-                        string("\""),
-                        string("'"),
-                    ]))
-                    .then(utf8_char(vec![])),
-                ])
-                .repeated(0, None),
-            )
+            .then(choice((paren, quoted("\""), quoted("'"), bracket(), other_char)).repeated())
             .then(string(")").optional())
-            .reduce(values_to_string)
+            .map(join_chunk)
     })
 }
 
 // One non-separator character (separators and atomic openers are handled
 // elsewhere). `&&` is excluded as a unit, but a lone `&` is ordinary text.
-fn text_char() -> Parser {
-    lookahead_not(choice(vec![
+fn text_char<'i>() -> impl Parser<'i, Output = char> {
+    lookahead_not(choice([
         string("&&"),
         string("|"),
         string(","),
@@ -136,95 +107,46 @@ fn text_char() -> Parser {
         string("("),
         string("["),
     ]))
-    .then(utf8_char(vec![]))
+    .ignore_then(any())
 }
 
-// A maximal run of text: atomic chunks and plain chars, reduced to one string.
-fn text_part() -> Parser {
-    choice(vec![
+// A maximal run of text: atomic chunks and plain chars, reduced to one `Tok::Text`.
+fn text_part<'i>() -> impl Parser<'i, Output = Tok> {
+    choice((
         quoted("\""),
         quoted("'"),
         paren(),
         bracket(),
-        text_char(),
-    ])
-    .repeated(1, None)
-    .reduce(values_to_string)
-    .tagged("text")
+        text_char().map(|c| c.to_string()),
+    ))
+    .repeated_at_least(1)
+    .map(|frags: Vec<String>| Tok::Text(frags.concat()))
 }
 
-// A separator literal: matched, its token discarded (`.ignored`), and emitted as
-// an empty tagged marker the assembler maps to a `Tok`.
-fn separator(literal: &'static str, tag: &'static str) -> Parser {
-    string(literal).ignored().tagged(tag)
-}
-
-fn whitespace() -> Parser {
-    utf8_char(vec![
-        Utf8Predicate::Char('\t'),
-        Utf8Predicate::Char('\n'),
-        Utf8Predicate::Char('\r'),
-        Utf8Predicate::Char(' '),
-    ])
-    .tagged("ws")
-}
-
-fn top() -> Parser {
-    choice(vec![
-        // `||`/`&&` before `|` (maximal munch); a lone `&` falls to text.
-        string("||").tagged("reserved"),
-        string("&&").tagged("reserved"),
-        separator("|", "pipe"),
-        separator(",", "comma"),
-        separator("=", "eq"),
-        separator(":", "colon"),
-        whitespace(),
+// The top level: zero or more separators / whitespace / text runs. `||`/`&&` are
+// tried before `|` (maximal munch); a lone `&` falls through to text.
+fn top<'i>() -> impl Parser<'i, Output = Vec<Tok>> {
+    repeat(choice((
+        string("||").map(|_| Tok::Reserved("||")),
+        string("&&").map(|_| Tok::Reserved("&&")),
+        string("|").map(|_| Tok::Pipe),
+        string(",").map(|_| Tok::Comma),
+        string("=").map(|_| Tok::Eq),
+        string(":").map(|_| Tok::Colon),
+        one_of(" \t\n\r").map(Tok::Ws),
         text_part(),
-    ])
-    .repeated(0, None)
+    )))
 }
 
 // Tokenize a tag's inner text to top-level `Tok`s, matching `scan_top_level`.
 pub(crate) fn scan_top_level(source: &str) -> Vec<Tok> {
-    match top().parse(source) {
-        Ok(success) => success
-            .tokens
-            .into_iter()
-            .filter_map(tok_from_value)
-            .collect(),
-        // The grammar consumes every char (any non-separator is text), so a parse
-        // failure is unreachable; degrade to a single text token rather than panic.
+    // The grammar consumes every char (any non-separator is text), so it always
+    // succeeds and consumes all input; degrade to a single text token rather than
+    // panic if that invariant is ever broken.
+    match top().parse_partial(source) {
+        Ok((toks, _rest)) => toks,
         Err(_) => vec![Tok::Text(source.to_string())],
     }
-}
-
-fn tok_from_value(value: Value) -> Option<Tok> {
-    let Value::Tagged(name, items) = value else {
-        return None;
-    };
-    let first_str = || match items.first() {
-        Some(Value::Str(s)) => s.clone(),
-        _ => String::new(),
-    };
-    Some(match name.as_str() {
-        "text" => Tok::Text(first_str()),
-        "pipe" => Tok::Pipe,
-        "comma" => Tok::Comma,
-        "eq" => Tok::Eq,
-        "colon" => Tok::Colon,
-        "reserved" => match first_str().as_str() {
-            "&&" => Tok::Reserved("&&"),
-            _ => Tok::Reserved("||"),
-        },
-        "ws" => {
-            let c = match items.first() {
-                Some(Value::Int(cp)) => cp.to_string().parse::<u32>().ok().and_then(char::from_u32),
-                _ => None,
-            };
-            Tok::Ws(c.unwrap_or(' '))
-        }
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

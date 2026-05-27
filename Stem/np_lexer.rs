@@ -1,59 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// NOTE (historical): this reference example uses the pre-rewrite, `Value`-based
-// `nimble_parsec_rs` API, which has since been replaced by the typed
-// `Parser<Output>` surface (see `rust/docs/rfcs/0001-typed-parser.md`). For the
-// typed equivalent of this lexer — text/tags/comments folded into a typed token
-// enum with no `Value` tagging — see `rust/tests/typed_grammar.rs`.
+// Combinator lexer — a `nimble_parsec_rs` port of `Stem.Parser`'s `do_lex`
+// (see `Stem/parser.ex`), built on the crate's **typed** `Parser<Output>` API.
+// `do_lex` (the combinator grammar) recognizes the raw lexical units (text runs,
+// comments, raw blocks, `{{{ }}}` and `{{ }}` tags) and yields a typed `Lexeme`
+// directly — no dynamic `Value` tagging or post-parse decode. `tokenize` then
+// folds the `Lexeme`s into the `Token` stream, applying trim markers, backslash
+// escapes, and tag classification, mirroring Elixir's `assemble_tokens`.
 //
-// Combinator lexer — a `nimble_parsec_rs` port of `Stem.Parser`'s lexer, sharing
-// one conceptual model with the BEAM reference. `do_lex` (the combinator grammar)
-// recognizes the raw lexical units (text runs, comments, raw blocks, `{{{ }}}`
-// and `{{ }}` tags), mirroring Elixir's NimbleParsec `do_lex`; `tokenize` then
-// folds them into the `Token` stream, applying trim markers, backslash escapes,
-// and tag classification, mirroring Elixir's hand-written `assemble_tokens`.
-//
-// This replaces the previous hand-written byte-scanning tokenizer; the structural
-// parser (`assemble`/`collect`) and the existing wire/conformance gates
-// (`compile_diff`/`verify`/`fuzz`) are the arbiter of byte-for-byte parity.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// This file doubles as a *worked example* of `nimble_parsec_rs`: a complete,
-// real-world lexer that exercises a broad slice of the crate's surface. It uses
-// both calling styles deliberately — the free combinator functions (`string`,
-// `choice`, `lookahead_not`, `post_traverse`, …), which mirror NimbleParsec's
-// names for readers porting from Elixir, and the fluent `Parser` methods
-// (`.then`, `.ignored`, `.repeated`, `.reduce`, `.tagged`), which read better
-// when chaining. Every fluent method delegates to the free function of the
-// matching name, so the two are interchangeable; pick whichever reads best.
-//
-// Combinator coverage (this file + its sibling `np_expr.rs`):
-//
-//   Demonstrated here:
-//     string, utf8_char, ascii_string (+ AsciiPredicate ranges)   — leaves
-//     concat (`.then`), ignore (`.ignored`)                       — sequencing
-//     repeat (`.repeated`), choice                                — control flow
-//     lookahead_not                                               — negative assertion
-//     reduce (`.reduce`), tag (`.tagged`)                         — result shaping
-//     post_traverse                                               — context-aware
-//                                                                    validation + the
-//                                                                    end-offset injection,
-//                                                                    and *failing* the parse
-//   Demonstrated in `np_expr.rs`:
-//     recursive / ParserRef, optional, `.or`, Utf8Predicate
-//   Purpose-built alternatives worth knowing (not needed by this grammar):
-//     byte_offset / line — emit position metadata directly, instead of the manual
-//       `post_traverse` offset injection used here (kept manual so the decoder gets
-//       a flat `[content…, end]` shape); map / wrap / replace / unwrap_and_tag —
-//       other result transforms; times / duplicate / repeat_while — bounded or
-//       predicate-driven repetition; eventually / lookahead — scan-ahead; eos —
-//       end-of-input assertion; label — override a failure message (no effect here,
-//       since `choice` makes the top-level grammar total). See the crate README.
+// Mapping from the Elixir NimbleParsec grammar (`Stem.Parser`):
+//   * `string` / `ignore` / `repeat` / `lookahead_not` / `choice`  — kept as the
+//     NimbleParsec-named free functions via `nimble_parsec_rs::nimble`.
+//   * `utf8_char([])`                 → `any()`            (a single character)
+//   * `ascii_string(ranges, min: 1)`  → `take_while1(pred)`
+//   * `reduce({List, :to_string, []})`→ `.map(collect)`    (chars → String)
+//   * `post_traverse(inject_end_pos)` → `byte_offset(..)`  (pairs the end offset)
+//   * `tag(:name)`                    → `.map(|..| Lexeme { .. })` (a typed value)
+//   * `post_traverse(validate_..)`    → `.try_map(..)`      (validate + reduce)
 
-use nimble_parsec_rs::{
-    ascii_string, choice, lookahead_not, post_traverse, string, utf8_char, AsciiPredicate,
-    Integer, Parser, Value,
-};
+use nimble_parsec_rs::nimble::{any, byte_offset, choice, lookahead_not, repeat, string, Parser};
+use nimble_parsec_rs::typed::take_while1;
 
 use crate::{classify, extract_trim, flush_text, trim_trailing_text, CompileError, Token};
 
@@ -79,172 +45,145 @@ enum LexKind {
     StandardTag(String),
 }
 
-// ── do_lex grammar (mirrors `Stem.Parser.do_lex`) ────────────────────────────
+// ── do_lex grammar (mirrors `Stem.Parser`'s combinators) ─────────────────────
 
-// The character class for a tag/raw-block name: `[A-Za-z0-9_-]`. `AsciiPredicate`
-// ranges and single chars compose into the set `ascii_string` accepts.
-fn name_predicates() -> Vec<AsciiPredicate> {
-    vec![
-        AsciiPredicate::Range(b'a'..=b'z'),
-        AsciiPredicate::Range(b'A'..=b'Z'),
-        AsciiPredicate::Range(b'0'..=b'9'),
-        AsciiPredicate::Char(b'_'),
-        AsciiPredicate::Char(b'-'),
-    ]
+// The character class for a tag/raw-block name: `[A-Za-z0-9_-]` — the Elixir
+// `ascii_string([?a..?z, ?A..?Z, ?0..?9, ?_, ?-], min: 1)`.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-// Collapse a run of `utf8_char` codepoint integers into a string — the `reduce`
-// callback fills the role Elixir gives `reduce({List, :to_string, []})`.
-fn codepoints_to_string(tokens: Vec<Value>) -> Value {
-    let text: String = tokens
-        .iter()
-        .filter_map(|value| match value {
-            Value::Int(int) => int.to_string().parse::<u32>().ok().and_then(char::from_u32),
-            _ => None,
-        })
-        .collect();
-    Value::Str(text)
+fn collect_string(chars: Vec<char>) -> String {
+    chars.into_iter().collect()
 }
 
-// Wrap `inner` so the assembler can recover each unit's span: `post_traverse`
-// runs a closure *after* `inner` with the post-parse cursor in hand, letting us
-// append the byte offset just past the match; `.tagged` then names the unit.
-// Mirrors Elixir's `post_traverse(inject_end_pos)` followed by `tag/1`.
-//
-// (`nimble_parsec_rs` also ships a `byte_offset` combinator that emits the
-// position directly; we hand-roll it via `post_traverse` only to keep a flat
-// `[content…, end]` token shape that `lexeme_from_value` can pop in order.)
-fn tagged_with_end(inner: Parser, tag: &'static str) -> Parser {
-    post_traverse(inner, |mut tokens, context, cursor| {
-        tokens.push(Value::Int(Integer::from(cursor.byte_offset)));
-        Ok((tokens, context))
-    })
-    .tagged(tag)
+// A run of characters up to (but not consuming) `stop`, reduced to a `String` —
+// the typed form of `repeat(lookahead_not(stop) |> utf8_char([]))` +
+// `reduce({List, :to_string, []})`.
+fn chars_until<'i>(stop: &'static str) -> impl Parser<'i, Output = String> {
+    repeat(lookahead_not(string(stop)).ignore_then(any())).map(collect_string)
 }
 
-// `repeat`-of-`utf8_char` stopping before `stop`, reduced to a string. Shown in
-// fluent style: each `utf8_char` is gated by a `lookahead_not` (so we never
-// consume the terminator), the pair is `.repeated`, and the run is `.reduce`d.
-fn chars_until(stop: &'static str) -> Parser {
-    lookahead_not(string(stop))
-        .then(utf8_char(vec![]))
-        .repeated(0, None)
-        .reduce(codepoints_to_string)
-}
-
-// A maximal run of text, stopping before the next `{{`. Same shape as
-// `chars_until` but with a minimum of 1 (an empty text run carries no meaning).
-fn text_chunk() -> Parser {
-    tagged_with_end(
+// A maximal run of text, stopping before the next `{{` (at least one character).
+// `byte_offset` pairs the text with the end position, then `.map` builds the
+// `Lexeme` — replacing the Elixir `post_traverse(inject_end_pos) |> tag(:text)`.
+fn text_chunk<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
         lookahead_not(string("{{"))
-            .then(utf8_char(vec![]))
-            .repeated(1, None)
-            .reduce(codepoints_to_string),
-        "text",
+            .ignore_then(any())
+            .repeated_at_least(1)
+            .map(collect_string),
     )
+    .map(|(text, end)| Lexeme {
+        kind: LexKind::Text(text),
+        end,
+    })
 }
 
-// `{{!-- … --}}` — opener, body (ignored), closer. `.ignored()` discards the
-// delimiters' and body's tokens; only the unit's tag + end offset survive.
-fn block_comment() -> Parser {
-    tagged_with_end(
+// `{{!-- … --}}` — opener, body, closer. The body is parsed (to find the closer)
+// but discarded; only the unit and its end position survive.
+fn block_comment<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
         string("{{!--")
-            .ignored()
-            .then(chars_until("--}}").ignored())
-            .then(string("--}}").ignored()),
-        "block_comment",
+            .ignore_then(chars_until("--}}"))
+            .then_ignore(string("--}}")),
     )
+    .map(|(_body, end)| Lexeme {
+        kind: LexKind::BlockComment,
+        end,
+    })
 }
 
 // `{{! … }}` — the single-brace inline comment variant.
-fn inline_comment() -> Parser {
-    tagged_with_end(
+fn inline_comment<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
         string("{{!")
-            .ignored()
-            .then(chars_until("}}").ignored())
-            .then(string("}}").ignored()),
-        "inline_comment",
+            .ignore_then(chars_until("}}"))
+            .then_ignore(string("}}")),
     )
+    .map(|(_body, end)| Lexeme {
+        kind: LexKind::InlineComment,
+        end,
+    })
 }
 
-// `{{{{#name}}}}…{{{{/name}}}}` — the open name, verbatim content, and close name
-// are captured; the delimiters are ignored.
-fn raw_block() -> Parser {
-    let parser = string("{{{{#")
-        .ignored()
-        .then(ascii_string(name_predicates(), 1, None))
-        .then(string("}}}}").ignored())
-        .then(chars_until("{{{{/"))
-        .then(string("{{{{/").ignored())
-        .then(ascii_string(name_predicates(), 1, None))
-        .then(string("}}}}").ignored());
-
-    // `post_traverse` can also *reject* the parse: here it validates that the
-    // open/close names match and keeps only the content, mirroring Elixir's
-    // `validate_and_reduce_raw_block`. Returning `Err` turns into a parse failure.
-    let validated = post_traverse(parser, |tokens, context, _cursor| match tokens.as_slice() {
-        [Value::Str(open), Value::Str(content), Value::Str(close)] => {
-            if open == close {
-                Ok((vec![Value::Str(content.clone())], context))
-            } else {
-                Err(format!(
-                    "raw block open `{{{{{{{{#{open}}}}}}}}}` is closed by `{{{{{{{{/{close}}}}}}}}}`"
-                ))
-            }
-        }
-        _ => Err("malformed raw block".to_string()),
-    });
-    tagged_with_end(validated, "raw_block")
+// `{{{{#name}}}}…{{{{/name}}}}` — `try_map` validates that the open/close names
+// match (mirroring Elixir's `validate_and_reduce_raw_block`) and keeps only the
+// content; a mismatch fails the branch and `choice` falls through.
+fn raw_block<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
+        string("{{{{#")
+            .ignore_then(take_while1(is_name_char))
+            .then_ignore(string("}}}}"))
+            .then(chars_until("{{{{/"))
+            .then_ignore(string("{{{{/"))
+            .then(take_while1(is_name_char))
+            .then_ignore(string("}}}}"))
+            .try_map(|((open, content), close): ((&str, String), &str)| {
+                if open == close {
+                    Ok(content)
+                } else {
+                    Err(format!(
+                        "raw block open `{{{{{{{{#{open}}}}}}}}}` is closed by `{{{{{{{{/{close}}}}}}}}}`"
+                    ))
+                }
+            }),
+    )
+    .map(|(content, end)| Lexeme {
+        kind: LexKind::RawBlock(content),
+        end,
+    })
 }
 
 // `{{{ … }}}` — a triple-brace raw tag; its inner text is kept verbatim.
-fn raw_tag() -> Parser {
-    tagged_with_end(
+fn raw_tag<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
         string("{{{")
-            .ignored()
-            .then(chars_until("}}}"))
-            .then(string("}}}").ignored()),
-        "raw_tag",
+            .ignore_then(chars_until("}}}"))
+            .then_ignore(string("}}}")),
     )
+    .map(|(inner, end)| Lexeme {
+        kind: LexKind::RawTag(inner),
+        end,
+    })
 }
 
 // `{{ … }}` — the ordinary double-brace tag; inner text kept for classification.
-fn standard_tag() -> Parser {
-    tagged_with_end(
+fn standard_tag<'i>() -> impl Parser<'i, Output = Lexeme> {
+    byte_offset(
         string("{{")
-            .ignored()
-            .then(chars_until("}}"))
-            .then(string("}}").ignored()),
-        "standard_tag",
+            .ignore_then(chars_until("}}"))
+            .then_ignore(string("}}")),
     )
+    .map(|(inner, end)| Lexeme {
+        kind: LexKind::StandardTag(inner),
+        end,
+    })
 }
 
 // The whole document: zero or more lexical units. `choice` tries the alternatives
-// in order (longest/most-specific delimiters first so `{{{{` beats `{{{` beats
-// `{{`, and text is the catch-all), and `.repeated(0, None)` tiles the source.
-fn do_lex() -> Parser {
-    choice(vec![
+// in order (most-specific delimiters first so `{{{{` beats `{{{` beats `{{`, and
+// text is the catch-all); `repeat` tiles the source into a `Vec<Lexeme>`.
+fn do_lex<'i>() -> impl Parser<'i, Output = Vec<Lexeme>> {
+    repeat(choice((
         block_comment(),
         inline_comment(),
         raw_block(),
         raw_tag(),
         standard_tag(),
         text_chunk(),
-    ])
-    .repeated(0, None)
+    )))
 }
 
 fn raw_lex(source: &str) -> Result<Vec<Lexeme>, CompileError> {
-    match do_lex().parse(source) {
-        Ok(success) if success.rest.is_empty() => {
-            success.tokens.into_iter().map(lexeme_from_value).collect()
-        }
-        // An unconsumed remainder means an unterminated tag/comment/raw block:
-        // report the offset, matching the hand-written tokenizer's error span.
-        Ok(success) => Err(CompileError {
+    // `do_lex` is `repeat(..)`, so it is total — it never returns `Err`; an
+    // unconsumed remainder means an unterminated tag/comment/raw block.
+    match do_lex().parse_partial(source) {
+        Ok((lexemes, rest)) if rest.is_empty() => Ok(lexemes),
+        Ok((_, rest)) => Err(CompileError {
             message: "unterminated tag while lexing template".to_string(),
             file: String::new(),
-            start: success.cursor.byte_offset,
+            start: source.len() - rest.len(),
             end: source.len(),
         }),
         Err(failure) => Err(CompileError {
@@ -254,39 +193,6 @@ fn raw_lex(source: &str) -> Result<Vec<Lexeme>, CompileError> {
             end: source.len(),
         }),
     }
-}
-
-fn lexeme_from_value(value: Value) -> Result<Lexeme, CompileError> {
-    let internal = |message: &str| CompileError {
-        message: format!("internal lexer error: {message}"),
-        file: String::new(),
-        start: 0,
-        end: 0,
-    };
-    let Value::Tagged(name, mut items) = value else {
-        return Err(internal("lexer token is not tagged"));
-    };
-    let end = match items.pop() {
-        Some(Value::Int(offset)) => offset
-            .to_string()
-            .parse::<usize>()
-            .map_err(|_| internal("end offset out of range"))?,
-        _ => return Err(internal("lexer token is missing its end offset")),
-    };
-    let content = |items: &mut Vec<Value>| match items.pop() {
-        Some(Value::Str(text)) => Ok(text),
-        _ => Err(internal("lexer token is missing its string payload")),
-    };
-    let kind = match name.as_str() {
-        "text" => LexKind::Text(content(&mut items)?),
-        "block_comment" => LexKind::BlockComment,
-        "inline_comment" => LexKind::InlineComment,
-        "raw_block" => LexKind::RawBlock(content(&mut items)?),
-        "raw_tag" => LexKind::RawTag(content(&mut items)?),
-        "standard_tag" => LexKind::StandardTag(content(&mut items)?),
-        other => return Err(internal(&format!("unknown lexer tag `{other}`"))),
-    };
-    Ok(Lexeme { kind, end })
 }
 
 // ── Assembler (mirrors `Stem.Parser.assemble_tokens`) ────────────────────────
