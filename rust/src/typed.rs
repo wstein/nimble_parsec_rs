@@ -79,22 +79,30 @@ pub trait Parser<'i> {
     /// backtracking combinators snapshot and restore it themselves.
     fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Self::Output>;
 
-    /// Runs the parser over the whole `text`, requiring all input to be consumed.
+    /// Runs the parser over the whole `text`, requiring all input to be consumed,
+    /// with the default recursion cap ([`DEFAULT_MAX_RECURSION_DEPTH`]).
     fn parse(&self, text: &'i str) -> PResult<'i, Self::Output>
     where
         Self: Sized,
     {
-        let prev = crate::RECURSION_BUDGET.with(|b| b.replace(DEFAULT_MAX_RECURSION_DEPTH));
-        let mut input = Input::new(text);
-        let result = self.parse_next(&mut input);
-        crate::RECURSION_BUDGET.with(|b| b.set(prev));
-        let output = result?;
-        if input.rest.is_empty() {
+        self.parse_with_max_depth(text, DEFAULT_MAX_RECURSION_DEPTH)
+    }
+
+    /// Like [`parse`](Parser::parse), but caps recursion depth at `max_depth`.
+    fn parse_with_max_depth(&self, text: &'i str, max_depth: usize) -> PResult<'i, Self::Output>
+    where
+        Self: Sized,
+    {
+        let (output, rest) = self.parse_partial_with_max_depth(text, max_depth)?;
+        if rest.is_empty() {
             Ok(output)
         } else {
+            // Re-derive the position of the leftover for the error.
+            let mut input = Input::new(text);
+            input.bump(&text[..text.len() - rest.len()]);
             Err(ParseFailure::expecting(
                 "expected end of input",
-                input.rest,
+                rest,
                 input.cursor,
             ))
         }
@@ -106,7 +114,22 @@ pub trait Parser<'i> {
     where
         Self: Sized,
     {
-        let prev = crate::RECURSION_BUDGET.with(|b| b.replace(DEFAULT_MAX_RECURSION_DEPTH));
+        self.parse_partial_with_max_depth(text, DEFAULT_MAX_RECURSION_DEPTH)
+    }
+
+    /// Like [`parse_partial`](Parser::parse_partial), but caps recursion depth at
+    /// `max_depth`.
+    fn parse_partial_with_max_depth(
+        &self,
+        text: &'i str,
+        max_depth: usize,
+    ) -> Result<(Self::Output, &'i str), ParseFailure<'i>>
+    where
+        Self: Sized,
+    {
+        // Set the budget for this parse and restore the previous one on return,
+        // so a `parse` invoked from within a transform closure is re-entrant.
+        let prev = crate::RECURSION_BUDGET.with(|b| b.replace(max_depth));
         let mut input = Input::new(text);
         let result = self.parse_next(&mut input);
         crate::RECURSION_BUDGET.with(|b| b.set(prev));

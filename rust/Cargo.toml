@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 license = "Apache-2.0"
-description = "A runtime + codegen Rust port of a subset of NimbleParsec's parser combinators"
+description = "An idiomatic, typed Rust port of NimbleParsec's parser combinators"
 repository = "https://github.com/wstein/nimble_parsec_rs"
 homepage = "https://github.com/wstein/nimble_parsec_rs"
 readme = "README.md"
@@ -16,14 +16,6 @@ name = "nimble_parsec_rs"
 path = "src/lib.rs"
 
 [dependencies]
-nimble_parsec_rs_macro = { path = "parsec_macro" }
-num-bigint = "0.4"
-rand = "0.8"
 
 [dev-dependencies]
-criterion = "0.5"
 proptest = "1"
-
-[[bench]]
-name = "parser_bench"
-harness = false
