@@ -31,7 +31,7 @@ carries three costs:
    The `Value` enum is what a Rust reviewer judges the crate by.
 
 The small-integer fast path and the shared accumulator have softened the
-allocation cost, but the *typing* cost is structural and only a generic surface
+allocation cost, but the _typing_ cost is structural and only a generic surface
 removes it.
 
 ## Goals / non-goals
@@ -41,7 +41,7 @@ removes it.
 [`ParseFailure`](../../src/lib.rs) (its `expected` set fits unchanged); keep
 `&str` input and zero-copy slices where possible.
 
-**Non-goals.** Generic *input* (stay `&str`-only for now; bytes/streaming is a
+**Non-goals.** Generic _input_ (stay `&str`-only for now; bytes/streaming is a
 later RFC). Preserving the `Value` API — per the repo's no-backward-compat
 stance, `1.0` replaces it rather than layering over it.
 
@@ -88,7 +88,7 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
 - **Recursion cap stays.** The thread-local depth budget is orthogonal to output
   typing and carries over unchanged.
 - **Codegen.** The `compile_parser!` / `defparsec!` macros lower to the same typed
-  combinators; the generated code becomes *simpler* (no `Value` push/pop), and
+  combinators; the generated code becomes _simpler_ (no `Value` push/pop), and
   `__private` helpers are re-typed. This is the largest single migration cost.
 
 ### Alternatives considered
@@ -96,15 +96,18 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
 - **Concrete `Parser<O>` struct boxing a closure.** Simpler types, uniform
   storage, but a heap allocation + dynamic dispatch per combinator. Rejected on
   performance grounds (the whole point is to remove overhead).
-- **Keep `Value`, add a typed *view* layer.** A back-compat layer the repo
+- **Keep `Value`, add a typed _view_ layer.** A back-compat layer the repo
   explicitly forbids, and it would not remove the runtime tagging.
 
 ## Migration plan (phased, each phase independently landable)
 
 1. **This RFC.** (done)
-2. **Typed core (`typed` module).** The trait, leaves, and `map`/`then`/`or`/
-   `repeated`/`optional`, with unit + property tests. Lives beside the existing
-   API; nothing else changes.
+2. **Typed core (`typed` module).** ✅ Done. The `Parser<'i>` trait with
+   `map`/`then`/`ignore_then`/`then_ignore`/`or`/`optional`/`repeated`/`labelled`,
+   leaves (`literal`/`any`/`satisfy`/`take_while`/`digits`/`eof`), and a boxed
+   `recursive` that reuses the structured `ParseFailure` and the recursion cap.
+   Tested in [`rust/tests/typed.rs`](../../tests/typed.rs); lives beside the
+   existing API.
 3. **Combinator parity.** Port the remaining ~25 combinators to the typed surface,
    reaching feature parity with the `Value` API; port the differential fixtures.
 4. **Codegen.** Re-target the proc-macro to emit typed combinators; re-type

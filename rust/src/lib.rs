@@ -33,6 +33,8 @@ pub use nimble_parsec_rs_macro::{
     compile_parser, defcombinator, defcombinatorp, defparsec, defparsecp,
 };
 
+pub mod typed;
+
 /// Position within the input, tracked as the parse advances. Column is
 /// derivable as `byte_offset - line_start_offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

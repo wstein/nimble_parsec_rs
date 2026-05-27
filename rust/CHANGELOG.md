@@ -10,6 +10,12 @@ public API (the ~31 combinators, the fluent `Parser` methods, and the `Value` /
 
 ### Added
 
+- Typed parser core (`nimble_parsec_rs::typed`, RFC 0001 phase 2): a `Parser<'i>`
+  trait generic over `Output`, composed at compile time with no runtime `Value`
+  tagging — `map`/`then`/`ignore_then`/`then_ignore`/`or`/`optional`/`repeated`/
+  `labelled`, leaves (`literal`/`any`/`satisfy`/`take_while`/`digits`/`eof`), and a
+  boxed `recursive`. Reuses the structured `ParseFailure` and the recursion cap;
+  lives beside the `Value` API during the migration to a typed surface.
 - Structured parse errors: `ParseFailure` now carries an `expected: Vec<String>`
   alongside `reason` — the token/character-class descriptions the parser was
   looking for, unioned across `choice` alternatives, and empty for non-expectation
