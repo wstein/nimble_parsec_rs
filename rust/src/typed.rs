@@ -1393,6 +1393,244 @@ impl_binary_num!(BeF64, be_f64, f64, 8, from_be_bytes, "Big-endian `f64`.");
 impl_binary_num!(LeF32, le_f32, f32, 4, from_le_bytes, "Little-endian `f32`.");
 impl_binary_num!(LeF64, le_f64, f64, 8, from_le_bytes, "Little-endian `f64`.");
 
+// ── Bit-level parsing ────────────────────────────────────────────────────────
+
+/// Types that can accumulate individual bits MSB-first.
+///
+/// Implemented for `u8`, `u16`, `u32`, `u64`, `u128`. The output of
+/// [`take_bits`] is generic over this trait so you choose the width at the
+/// call site: `take_bits::<u8, _>(4)` or `take_bits::<u32, _>(24)`.
+pub trait BitOutput:
+    Copy
+    + core::ops::Shl<usize, Output = Self>
+    + core::ops::BitOr<Output = Self>
+    + core::fmt::Debug
+    + PartialEq
+{
+    /// The zero value.
+    fn zero() -> Self;
+    /// The one value (used to represent a set bit).
+    fn one() -> Self;
+}
+
+macro_rules! impl_bit_output {
+    ($($t:ty),+) => {
+        $(impl BitOutput for $t {
+            #[inline] fn zero() -> Self { 0 }
+            #[inline] fn one()  -> Self { 1 }
+        })+
+    };
+}
+impl_bit_output!(u8, u16, u32, u64, u128);
+
+// ── take_bits ────────────────────────────────────────────────────────────────
+
+/// [`take_bits`].
+pub struct TakeBits<O: BitOutput, S: Stream<Token = u8>> {
+    n_bits: usize,
+    _phantom: PhantomData<fn(S) -> O>,
+}
+
+impl<O: BitOutput, S: Stream<Token = u8>> Parser<crate::Bits<S>> for TakeBits<O, S> {
+    type Output = O;
+
+    fn parse_next(&self, input: &mut Input<crate::Bits<S>>) -> PResult<crate::Bits<S>, O> {
+        if input.stream.len() < self.n_bits {
+            return incomplete_or_err(
+                &format!("expected {} bits", self.n_bits),
+                input.stream.as_slice(),
+                input.cursor,
+            );
+        }
+        let mut acc = O::zero();
+        for _ in 0..self.n_bits {
+            let (bit, w) = input.stream.first().unwrap();
+            acc = (acc << 1) | if bit { O::one() } else { O::zero() };
+            input.bump(w);
+        }
+        Ok(acc)
+    }
+}
+
+/// Reads exactly `n_bits` bits from a [`Bits`](crate::Bits) stream and
+/// accumulates them MSB-first into `O` (e.g. `u8`, `u32`).
+///
+/// # Example
+/// ```
+/// use nimble_parsec_rs::typed::{take_bits, bits, Parser};
+///
+/// let result = bits(take_bits::<u8, &[u8]>(4))
+///     .parse(b"\xAB".as_ref())
+///     .unwrap();
+/// assert_eq!(result, 0x0A); // upper nibble of 0xAB
+/// ```
+pub fn take_bits<O: BitOutput, S: Stream<Token = u8>>(n_bits: usize) -> TakeBits<O, S> {
+    TakeBits {
+        n_bits,
+        _phantom: PhantomData,
+    }
+}
+
+// ── bit_bool ─────────────────────────────────────────────────────────────────
+
+/// [`bit_bool`].
+pub struct BitBool<S: Stream<Token = u8>> {
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream<Token = u8>> Parser<crate::Bits<S>> for BitBool<S> {
+    type Output = bool;
+
+    fn parse_next(&self, input: &mut Input<crate::Bits<S>>) -> PResult<crate::Bits<S>, bool> {
+        match input.stream.first() {
+            Some((bit, w)) => {
+                input.bump(w);
+                Ok(bit)
+            }
+            None => incomplete_or_err("expected a bit", input.stream.as_slice(), input.cursor),
+        }
+    }
+}
+
+/// Reads a single bit from a [`Bits`](crate::Bits) stream, yielding `true`
+/// for 1 and `false` for 0.
+///
+/// # Example
+/// ```
+/// use nimble_parsec_rs::typed::{bit_bool, bits, Parser};
+///
+/// let bools = bits(bit_bool::<&[u8]>().repeated())
+///     .parse(b"\x80".as_ref())
+///     .unwrap();
+/// assert_eq!(bools, vec![true, false, false, false, false, false, false, false]);
+/// ```
+pub fn bit_bool<S: Stream<Token = u8>>() -> BitBool<S> {
+    BitBool {
+        _phantom: PhantomData,
+    }
+}
+
+// ── bits() — enter bit context ───────────────────────────────────────────────
+
+/// [`bits`].
+pub struct BitsOf<P, S: Stream<Token = u8>> {
+    inner: P,
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream<Token = u8>, P: Parser<crate::Bits<S>>> Parser<S> for BitsOf<P, S> {
+    type Output = P::Output;
+
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
+        let bits_stream = crate::Bits::new(input.stream());
+        let mut bits_input = Input::new(bits_stream);
+
+        let result = self.inner.parse_next(&mut bits_input).map_err(|e| {
+            // Convert the bit-context error to a byte-context error.
+            match e {
+                ParseError::Incomplete(n) => ParseError::Incomplete(n),
+                ParseError::Failure(f) => ParseError::Failure(ParseFailure {
+                    reason: f.reason,
+                    expected: f.expected,
+                    rest: input.stream().as_slice(),
+                    cursor: input.cursor(),
+                }),
+            }
+        })?;
+
+        // bits_input.cursor().byte_offset counts BITS consumed (not bytes),
+        // because Bits::advance_cursor adds 1 per bit to byte_offset.
+        let bits_used = bits_input.cursor().byte_offset;
+        let bytes_adv = bits_used / 8 + (bits_used % 8 != 0) as usize;
+        input.bump(bytes_adv);
+
+        Ok(result)
+    }
+}
+
+/// Runs parser `inner` on a bit-level view of the current byte stream, then
+/// advances the byte stream past all bytes touched by the inner parse.
+///
+/// The inner parser operates on a [`Bits<S>`](crate::Bits) stream where each
+/// token is a `bool` (MSB-first). When it finishes, the outer byte stream
+/// advances by `⌈bits_consumed / 8⌉` bytes.
+///
+/// Use [`byte_aligned`] inside the bit context when you need to guarantee
+/// alignment to the next byte boundary before re-entering byte parsing.
+///
+/// # Example
+/// ```
+/// use nimble_parsec_rs::typed::{take_bits, bits, Parser};
+///
+/// // Split one byte into two nibbles.
+/// let (hi, lo) = bits(take_bits::<u8, &[u8]>(4).then(take_bits::<u8, &[u8]>(4)))
+///     .parse(b"\xAB".as_ref())
+///     .unwrap();
+/// assert_eq!((hi, lo), (0x0A, 0x0B));
+/// ```
+pub fn bits<S: Stream<Token = u8>, P: Parser<crate::Bits<S>>>(inner: P) -> BitsOf<P, S> {
+    BitsOf {
+        inner,
+        _phantom: PhantomData,
+    }
+}
+
+// ── byte_aligned() — exit to byte boundary ──────────────────────────────────
+
+/// [`byte_aligned`].
+pub struct ByteAligned<P, S: Stream<Token = u8>> {
+    inner: P,
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream<Token = u8>, P: Parser<crate::Bits<S>>> Parser<crate::Bits<S>>
+    for ByteAligned<P, S>
+{
+    type Output = P::Output;
+
+    fn parse_next(&self, input: &mut Input<crate::Bits<S>>) -> PResult<crate::Bits<S>, P::Output> {
+        let result = self.inner.parse_next(input)?;
+        // Skip the remaining bits in the current byte so the position is on a
+        // byte boundary.  If bit_offset is already 0 we are already aligned.
+        let leftover = input.stream().bit_offset;
+        if leftover > 0 {
+            let skip = 8 - leftover as usize;
+            input.bump(skip);
+        }
+        Ok(result)
+    }
+}
+
+/// Runs `inner` on a [`Bits`](crate::Bits) stream and then advances past any
+/// remaining bits in the current byte, ensuring the stream is on a byte
+/// boundary when this combinator returns.
+///
+/// Useful when a field does not fill a whole byte: e.g. after parsing a 3-bit
+/// field, `byte_aligned` skips 5 padding bits.
+///
+/// # Example
+/// ```
+/// use nimble_parsec_rs::typed::{take_bits, bits, byte_aligned, Parser};
+///
+/// // Parse 3-bit field; discard remaining 5 bits; parse next full byte.
+/// let (field, next_byte) = bits(
+///     byte_aligned(take_bits::<u8, &[u8]>(3))
+///         .then(take_bits::<u8, &[u8]>(8))
+/// )
+/// .parse(b"\xE0\xFF".as_ref())
+/// .unwrap();
+/// assert_eq!(field, 0b111);  // top 3 bits of 0xE0
+/// assert_eq!(next_byte, 0xFF);
+/// ```
+pub fn byte_aligned<S: Stream<Token = u8>, P: Parser<crate::Bits<S>>>(
+    inner: P,
+) -> ByteAligned<P, S> {
+    ByteAligned {
+        inner,
+        _phantom: PhantomData,
+    }
+}
+
 // ── utf8_char — text on bytes (Phase 3) ─────────────────────────────────────
 
 /// [`utf8_char`].
@@ -2294,9 +2532,10 @@ pub mod nimble {
     use crate::Stream;
 
     pub use super::{
-        any, bytes, choice, digits, empty, eventually, integer, lookahead, recursive, satisfy,
-        take_while, Parser,
+        any, bit_bool, bits, byte_aligned, bytes, choice, digits, empty, eventually, integer,
+        lookahead, recursive, satisfy, take_bits, take_while, BitOutput, Parser,
     };
+    pub use crate::{BitSlice, Bits};
 
     /// NimbleParsec name for [`literal`](super::literal).
     pub fn string<S: Stream + crate::Compare<&'static str>>(
