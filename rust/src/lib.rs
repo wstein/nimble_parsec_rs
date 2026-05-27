@@ -1,6 +1,7 @@
 //! A Rust port of [NimbleParsec](https://github.com/dashbitco/nimble_parsec),
 //! a parser-combinator library — with an idiomatic, **typed** surface and
-//! **generic input**: `&str`, `&[u8]`, or `Partial<_>` for streaming.
+//! **generic input**: `&str`, `&[u8]`, `&[T]` for any token type, or
+//! `Partial<_>` for streaming.
 //!
 //! Build a parser by composing combinators; each is generic over its output AND
 //! its **input stream**, so grammars compose and type-check at compile time.
@@ -16,6 +17,23 @@
 //!     .map(|ds: &str| ds.parse::<u32>().unwrap());
 //!
 //! assert_eq!(number.parse("(42)").unwrap(), 42);
+//! ```
+//!
+//! ## Supported stream types
+//!
+//! | Stream type | Token | Slice | Notes |
+//! |---|---|---|---|
+//! | `&str` | `char` | `&str` | Text; full newline/column tracking |
+//! | `&[u8]` | `u8` | `&[u8]` | Binary; via the `&[T]` blanket impl |
+//! | `&[T]` | `T` | `&[T]` | Any `Copy + PartialEq + Debug` token |
+//! | `Partial<S>` | same as `S` | same as `S` | Streaming/incomplete-input |
+//!
+//! For a two-phase lexer→parser pipeline, pass the lexer's `Vec<MyToken>`
+//! directly as a `&[MyToken]` slice — no wrapper needed:
+//!
+//! ```ignore
+//! let tokens: Vec<MyToken> = lex(input);
+//! let ast = my_parser.parse(tokens.as_slice()).unwrap();
 //! ```
 //!
 //! A parse yields the combinator's `Output` or a [`ParseFailure`] carrying a
@@ -161,46 +179,50 @@ impl<'i> Stream for &'i str {
     }
 }
 
-// ── impl Stream for &[u8] ────────────────────────────────────────────────────
+// ── impl Stream for &[T] ─────────────────────────────────────────────────────
+//
+// This blanket impl covers every element type T that is Copy + PartialEq +
+// Debug: plain byte arrays (&[u8]), arbitrary token slices (&[MyToken]), etc.
+// The binary leaf parsers (byte, be_u32, …) constrain their stream as
+// `S: Stream<Token = u8>`, so they continue to work with `&[u8]` without
+// any changes at the call site.
 
-impl StreamIsPartial for &[u8] {
+impl<T> StreamIsPartial for &[T] {
     const PARTIAL: bool = false;
 }
 
-impl<'i> Stream for &'i [u8] {
-    type Token = u8;
-    type Slice = &'i [u8];
+impl<'i, T: Copy + PartialEq + core::fmt::Debug> Stream for &'i [T] {
+    type Token = T;
+    type Slice = &'i [T];
 
-    fn first(self) -> Option<(u8, usize)> {
-        self.first().map(|&b| (b, 1))
+    fn first(self) -> Option<(T, usize)> {
+        self.split_first().map(|(&t, _)| (t, 1))
     }
 
-    fn split_at(self, n: usize) -> (&'i [u8], Self) {
-        <[u8]>::split_at(self, n)
+    fn split_at(self, n: usize) -> (&'i [T], Self) {
+        <[T]>::split_at(self, n)
     }
 
-    fn as_slice(self) -> &'i [u8] {
+    fn as_slice(self) -> &'i [T] {
         self
     }
 
     fn len(self) -> usize {
-        <[u8]>::len(self)
+        <[T]>::len(self)
     }
 
     fn advance_cursor(self, cursor: Cursor, n: usize) -> Cursor {
-        advance(cursor, &self[..n])
+        // Token slices carry no newline semantics (newlines belong to text
+        // streams, which use the dedicated `&str` impl). Only the element
+        // offset advances.
+        Cursor {
+            byte_offset: cursor.byte_offset + n,
+            ..cursor
+        }
     }
 
     fn preview(self, max_tokens: usize) -> String {
-        let mut s = String::new();
-        for &b in self.iter().take(max_tokens) {
-            if b.is_ascii_graphic() || b == b' ' {
-                s.push(b as char);
-            } else {
-                s.push_str(&format!("\\x{b:02x}"));
-            }
-        }
-        s
+        format!("{:?}", &self[..max_tokens.min(self.len())])
     }
 }
 
@@ -271,9 +293,15 @@ impl<S: Stream> Stream for Partial<S> {
 // ── Compare<Pat> — literal matching ──────────────────────────────────────────
 
 /// Matches a fixed pattern against the front of the stream, returning the
-/// number of base units consumed on success. Implemented separately for
-/// `(&str, &str)` and `(&[u8], &[u8])`, so a `&str` pattern on a byte stream
-/// is a **compile-time type error** rather than silent reinterpretation.
+/// number of base units consumed on success.
+///
+/// The separate `&str` and `&[T]` impls prevent a `&str` pattern from being
+/// used on a byte stream (and vice-versa) — mismatched patterns are
+/// **compile-time type errors** rather than silent logic bugs.
+///
+/// Two `&[T]` impls are provided:
+/// * `Compare<&[T]>` — prefix-slice match (`literal(b"PNG")`, `literal(&[Token::Plus, Token::Minus])`).
+/// * `Compare<T>` — single-element match (`literal(0x41_u8)`, `literal(MyToken::Eof)`).
 pub trait Compare<Pat> {
     /// Returns `Some(n)` if this stream starts with `pat`, where `n` is the
     /// number of base units consumed. Returns `None` on mismatch.
@@ -286,15 +314,23 @@ impl Compare<&str> for &str {
     }
 }
 
-impl Compare<&[u8]> for &[u8] {
-    fn starts_with_pat(self, pat: &[u8]) -> Option<usize> {
+/// Prefix-slice match: `&[T]` stream against a `&[T]` pattern.
+///
+/// Works for any `T: PartialEq`, e.g. `literal(b"PNG")` on `&[u8]` or
+/// `literal([Token::Plus, Token::Star].as_slice())` on `&[Token]`.
+impl<T: PartialEq> Compare<&[T]> for &[T] {
+    fn starts_with_pat(self, pat: &[T]) -> Option<usize> {
         self.starts_with(pat).then_some(pat.len())
     }
 }
 
-impl Compare<u8> for &[u8] {
-    fn starts_with_pat(self, pat: u8) -> Option<usize> {
-        self.first().filter(|&&b| b == pat).map(|_| 1)
+/// Single-token match: `&[T]` stream against a single `T` pattern.
+///
+/// Enables `literal(0x41_u8)` on `&[u8]` and `literal(MyToken::Eof)` on
+/// `&[MyToken]`. Returns 1 base unit on match.
+impl<T: Copy + PartialEq> Compare<T> for &[T] {
+    fn starts_with_pat(self, pat: T) -> Option<usize> {
+        self.split_first().filter(|(&t, _)| t == pat).map(|_| 1)
     }
 }
 
