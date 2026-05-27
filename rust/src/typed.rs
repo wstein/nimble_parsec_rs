@@ -857,18 +857,41 @@ pub fn none_of(set: &'static str) -> Satisfy<impl Fn(char) -> bool> {
     })
 }
 
-/// [`choice`].
-pub struct Choice<P, const N: usize> {
-    parsers: [P; N],
+/// A set of alternatives for [`choice`] — implemented for arrays `[P; N]`
+/// (same parser type) and for tuples `(A, B, …)` up to arity 8 (different parser
+/// types, one shared `Output`).
+pub trait Alternatives<'i> {
+    /// The shared output type of every alternative.
+    type Output;
+    /// Tries each alternative in order, returning the first success or a failure
+    /// unioning the alternatives' expectations.
+    fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, Self::Output>;
 }
 
-impl<'i, P: Parser<'i>, const N: usize> Parser<'i> for Choice<P, N> {
+fn choice_failure<'i>(
+    reasons: Vec<String>,
+    expected: Vec<String>,
+    at: Input<'i>,
+) -> ParseFailure<'i> {
+    ParseFailure {
+        reason: if reasons.is_empty() {
+            "choice has no options".to_string()
+        } else {
+            reasons.join(" or ")
+        },
+        expected,
+        rest: at.rest,
+        cursor: at.cursor,
+    }
+}
+
+impl<'i, P: Parser<'i>, const N: usize> Alternatives<'i> for [P; N] {
     type Output = P::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+    fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
         let start = *input;
         let mut reasons = Vec::with_capacity(N);
         let mut expected = Vec::new();
-        for parser in &self.parsers {
+        for parser in self {
             match parser.parse_next(input) {
                 Ok(out) => return Ok(out),
                 Err(err) => {
@@ -878,24 +901,277 @@ impl<'i, P: Parser<'i>, const N: usize> Parser<'i> for Choice<P, N> {
                 }
             }
         }
-        Err(ParseFailure {
-            reason: if reasons.is_empty() {
-                "choice has no options".to_string()
-            } else {
-                reasons.join(" or ")
-            },
-            expected,
-            rest: start.rest,
-            cursor: start.cursor,
-        })
+        Err(choice_failure(reasons, expected, start))
     }
 }
 
-/// Tries each parser in order, returning the first success. All alternatives
-/// share one type and `Output`; for differently-typed branches, chain
-/// [`Parser::or`] instead.
-pub fn choice<P, const N: usize>(parsers: [P; N]) -> Choice<P, N> {
-    Choice { parsers }
+macro_rules! impl_alternatives_tuple {
+    ($($idx:tt $param:ident),+) => {
+        impl<'i, O, $($param: Parser<'i, Output = O>),+> Alternatives<'i> for ($($param,)+) {
+            type Output = O;
+            fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, O> {
+                let start = *input;
+                let mut reasons = Vec::new();
+                let mut expected = Vec::new();
+                $(
+                    match self.$idx.parse_next(input) {
+                        Ok(out) => return Ok(out),
+                        Err(err) => {
+                            *input = start;
+                            reasons.push(err.reason);
+                            expected.extend(err.expected);
+                        }
+                    }
+                )+
+                Err(choice_failure(reasons, expected, start))
+            }
+        }
+    };
+}
+
+impl_alternatives_tuple!(0 P0, 1 P1);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
+
+/// [`choice`].
+pub struct ChoiceOf<A> {
+    alternatives: A,
+}
+
+impl<'i, A: Alternatives<'i>> Parser<'i> for ChoiceOf<A> {
+    type Output = A::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A::Output> {
+        self.alternatives.choice_parse(input)
+    }
+}
+
+/// Tries each alternative in order, returning the first success. Accepts an
+/// array `[p; N]` (same parser type) or a tuple `(a, b, …)` up to arity 8
+/// (different parser types sharing one `Output`).
+pub fn choice<'i, A: Alternatives<'i>>(alternatives: A) -> ChoiceOf<A> {
+    ChoiceOf { alternatives }
+}
+
+/// Generation counterpart of [`Alternatives`]: samples one alternative.
+pub trait GenerateAlternatives {
+    /// Generates input for a randomly chosen alternative.
+    fn generate_alt(&self, gen: &mut Gen, out: &mut String);
+}
+
+impl<P: Generate, const N: usize> GenerateAlternatives for [P; N] {
+    fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
+        if N > 0 {
+            self[gen.below(N)].generate_into(gen, out);
+        }
+    }
+}
+
+macro_rules! impl_generate_alternatives_tuple {
+    ($n:expr; $($idx:tt $param:ident),+) => {
+        impl<$($param: Generate),+> GenerateAlternatives for ($($param,)+) {
+            fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
+                match gen.below($n) {
+                    $( $idx => self.$idx.generate_into(gen, out), )+
+                    _ => {}
+                }
+            }
+        }
+    };
+}
+
+impl_generate_alternatives_tuple!(2; 0 P0, 1 P1);
+impl_generate_alternatives_tuple!(3; 0 P0, 1 P1, 2 P2);
+impl_generate_alternatives_tuple!(4; 0 P0, 1 P1, 2 P2, 3 P3);
+impl_generate_alternatives_tuple!(5; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
+impl_generate_alternatives_tuple!(6; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
+impl_generate_alternatives_tuple!(7; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
+impl_generate_alternatives_tuple!(8; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
+
+impl<A: GenerateAlternatives> Generate for ChoiceOf<A> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.alternatives.generate_alt(gen, out);
+    }
+}
+
+// ── Convenience combinators ──────────────────────────────────────────────────
+
+/// [`delimited`].
+pub struct Delimited<A, B, C> {
+    open: A,
+    content: B,
+    close: C,
+}
+
+impl<'i, A: Parser<'i>, B: Parser<'i>, C: Parser<'i>> Parser<'i> for Delimited<A, B, C> {
+    type Output = B::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, B::Output> {
+        self.open.parse_next(input)?;
+        let out = self.content.parse_next(input)?;
+        self.close.parse_next(input)?;
+        Ok(out)
+    }
+}
+
+impl<A: Generate, B: Generate, C: Generate> Generate for Delimited<A, B, C> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.open.generate_into(gen, out);
+        self.content.generate_into(gen, out);
+        self.close.generate_into(gen, out);
+    }
+}
+
+/// Parses `content` between `open` and `close`, keeping only `content`'s output.
+/// Sugar for `open.ignore_then(content).then_ignore(close)`.
+pub fn delimited<'i, A, B, C>(open: A, content: B, close: C) -> Delimited<A, B, C>
+where
+    A: Parser<'i>,
+    B: Parser<'i>,
+    C: Parser<'i>,
+{
+    Delimited {
+        open,
+        content,
+        close,
+    }
+}
+
+/// [`separated_by`] / [`separated_by1`].
+pub struct SeparatedBy<I, S> {
+    item: I,
+    sep: S,
+    min: usize,
+}
+
+impl<'i, I: Parser<'i>, S: Parser<'i>> Parser<'i> for SeparatedBy<I, S> {
+    type Output = Vec<I::Output>;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<I::Output>> {
+        let mut items = Vec::new();
+        let start = *input;
+        match self.item.parse_next(input) {
+            Ok(first) => items.push(first),
+            Err(err) => {
+                *input = start;
+                if self.min == 0 {
+                    return Ok(items);
+                }
+                return Err(err);
+            }
+        }
+        loop {
+            // A separator that isn't followed by an item is not consumed (no
+            // trailing separator), so restore to before it and stop.
+            let checkpoint = *input;
+            if self.sep.parse_next(input).is_err() {
+                *input = checkpoint;
+                break;
+            }
+            match self.item.parse_next(input) {
+                Ok(item) => {
+                    if input.rest.len() == checkpoint.rest.len() {
+                        *input = checkpoint; // no progress: avoid looping forever
+                        break;
+                    }
+                    items.push(item);
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+impl<I: Generate, S: Generate> Generate for SeparatedBy<I, S> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        let count = self.min + gen.below(3);
+        for i in 0..count {
+            if i > 0 {
+                self.sep.generate_into(gen, out);
+            }
+            self.item.generate_into(gen, out);
+        }
+    }
+}
+
+/// Zero or more `item`s separated by `sep` (no trailing separator), yielding
+/// `Vec<item::Output>`.
+pub fn separated_by<'i, I, S>(item: I, sep: S) -> SeparatedBy<I, S>
+where
+    I: Parser<'i>,
+    S: Parser<'i>,
+{
+    SeparatedBy { item, sep, min: 0 }
+}
+
+/// Like [`separated_by`], but requires at least one item.
+pub fn separated_by1<'i, I, S>(item: I, sep: S) -> SeparatedBy<I, S>
+where
+    I: Parser<'i>,
+    S: Parser<'i>,
+{
+    SeparatedBy { item, sep, min: 1 }
+}
+
+/// [`repeated_until`].
+pub struct RepeatedUntil<P, E> {
+    parser: P,
+    end: E,
+}
+
+impl<'i, P: Parser<'i>, E: Parser<'i>> Parser<'i> for RepeatedUntil<P, E> {
+    type Output = Vec<P::Output>;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<P::Output>> {
+        let mut items = Vec::new();
+        loop {
+            let checkpoint = *input;
+            // Stop when the terminator matches — without consuming it.
+            if self.end.parse_next(input).is_ok() {
+                *input = checkpoint;
+                break;
+            }
+            *input = checkpoint;
+            match self.parser.parse_next(input) {
+                Ok(item) => {
+                    if input.rest.len() == checkpoint.rest.len() {
+                        *input = checkpoint;
+                        break;
+                    }
+                    items.push(item);
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+impl<P: Generate, E> Generate for RepeatedUntil<P, E> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        // The terminator is the following parser's job, not ours.
+        for _ in 0..gen.below(3) {
+            self.parser.generate_into(gen, out);
+        }
+    }
+}
+
+/// Repeats `parser` until `end` would match (the terminator is **not**
+/// consumed), yielding `Vec<parser::Output>`. Sugar for the
+/// `not(end).ignore_then(parser).repeated()` idiom; also stops if `parser` fails.
+pub fn repeated_until<'i, P, E>(parser: P, end: E) -> RepeatedUntil<P, E>
+where
+    P: Parser<'i>,
+    E: Parser<'i>,
+{
+    RepeatedUntil { parser, end }
 }
 
 // ── Recursion ──────────────────────────────────────────────────────────────
@@ -1069,14 +1345,6 @@ impl<F: Fn(char) -> bool> Generate for TakeWhile<F> {
 
 impl Generate for Eof {
     fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
-}
-
-impl<P: Generate, const N: usize> Generate for Choice<P, N> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        if N > 0 {
-            self.parsers[gen.below(N)].generate_into(gen, out);
-        }
-    }
 }
 
 impl<P: Generate, F> Generate for Map<P, F> {

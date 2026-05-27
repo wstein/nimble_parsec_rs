@@ -34,12 +34,12 @@ Status legend:
 | --- | --- | --- | --- |
 | `concat` | `.then` | ✅ | Yields a tuple `(A, B)`. `.ignore_then` / `.then_ignore` keep one side. |
 | `optional` | `.optional` | ✅ | Yields `Option<O>`. |
-| `choice` | `choice([…])` / `.or` | ✅ | `choice` over same-typed alternatives; `.or` chains two. Failures union the `expected` set and join reasons with `" or "`. |
+| `choice` | `choice(alts)` / `.or` | ✅ | `alts` is an array `[p; N]` (same type) or a tuple `(a, b, …)` ≤ arity 8 (different types, one `Output`); `.or` chains two. Failures union the `expected` set and join reasons with `" or "`. |
 | `repeat` | `.repeated` | ✅ | Yields `Vec<O>`; a non-consuming match stops the loop. `.repeated_at_least(min)` for a floor. |
 | `times` | `.repeated_in(min, max)` | ✅ | Exact `n` is `.repeated_in(n, n)`. |
 | `lookahead` | `lookahead` | ✅ | Zero-width; yields the inner output without consuming. |
 | `lookahead_not` | `not` | ✅ | Zero-width negative assertion, yields `()`. |
-| `repeat_while` | `not(stop).ignore_then(p).repeated()` | 🧩 | No predicate-driven combinator; compose with `not`/`lookahead`. |
+| `repeat_while` | `repeated_until(p, stop)` | ✅ | Repeats `p` until `stop` would match (the terminator is left unconsumed). For an arbitrary boolean predicate, compose with `not`/`lookahead`. |
 | `eventually` | `not(p).ignore_then(any()).repeated().ignore_then(p)` | 🧩 | Compose: skip until the inner parser matches. |
 | `duplicate` | `.repeated_in(n, n)` | 🧩 | Or chain `.then`; no dedicated combinator. |
 
@@ -83,6 +83,9 @@ Status legend:
 | `.to(value)` | Constant replacement (NimbleParsec's `replace`, but typed). |
 | `.try_map(f)` | Fallible/validating transform. |
 | `.repeated_in(min, max)` / `.repeated_at_least(min)` | Bounded repetition. |
+| `delimited(open, content, close)` | Content between two delimiters. |
+| `separated_by` / `separated_by1` | A separated list (no trailing separator). |
+| `repeated_until(p, end)` | Repeat until a terminator (not consumed). |
 | `parse` / `parse_partial` (+ `*_with_max_depth`) | Run the parser, optionally returning the remainder or overriding the recursion cap. |
 
 ## Summary
@@ -97,5 +100,4 @@ codegen family is obsolete because the compiler monomorphizes the combinators
 directly.
 
 Outstanding (tracked in [rust/README.md](rust/README.md)): generic (non-`&str`)
-input — which unblocks `bytes`; and convenience combinators such as
-`separated_by` / `delimited` and a tuple-arity `choice`.
+input, which unblocks `bytes`.

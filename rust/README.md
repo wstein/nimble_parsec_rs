@@ -33,8 +33,11 @@ Leaves (free functions):
 - `take_while(pred)` / `take_while1(pred)` — a run of matching characters
 - `digits()` — one or more ASCII digits
 - `eof()` — end of input
-- `choice([p; N])` — the first of several same-typed alternatives
+- `choice(alts)` — the first matching alternative; `alts` is an array `[p; N]` (same type) or a tuple `(a, b, …)` up to arity 8 (different types, one `Output`)
 - `lookahead(p)` / `not(p)` — zero-width positive / negative assertions
+- `delimited(open, content, close)` — `content` between two delimiters
+- `separated_by(item, sep)` / `separated_by1(item, sep)` — a separated list (no trailing separator)
+- `repeated_until(p, end)` — repeat `p` until `end` would match (terminator not consumed)
 - `recursive(|me| …)` — self-referential grammars (depth-bounded)
 
 Composition (methods on [`Parser`]):
@@ -91,7 +94,6 @@ codegen layer is needed.
 ## Roadmap
 
 - **Generic input.** Lift the `&str`-only restriction to bytes / custom streams.
-- **More combinators.** `separated_by`, `delimited`, tuple-arity `choice`, folding.
 - **Fuzz corpus.** A persisted `cargo-fuzz` target alongside the property tests.
 - **Benchmarks.** A Criterion suite for the typed combinators.
 

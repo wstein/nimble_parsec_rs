@@ -25,6 +25,11 @@ library, replacing the dynamic `Value`-based port.
   `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
   and empty for non-expectation failures (negative assertions, `try_map`
   rejections, the recursion cap).
+- Convenience combinators: `delimited(open, content, close)`,
+  `separated_by` / `separated_by1` (separated lists, no trailing separator), and
+  `repeated_until(p, end)` (repeat until a terminator, not consumed). `choice` now
+  accepts a tuple `(a, b, …)` (arity ≤ 8) of differently-typed alternatives in
+  addition to an array `[p; N]`, via the new `Alternatives` trait.
 - `.post_traverse(f)` / `.pre_traverse(f)`: position-aware fallible transforms
   (the callback gets the end / start `Cursor` and may fail the parse with
   `Err(message)`). User context is threaded by capturing interior-mutable state
