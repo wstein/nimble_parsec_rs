@@ -121,9 +121,10 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
    lexer rebuilt on the typed API, yielding a typed token `enum` with no `Value`.
    The live `np_lexer` / `np_expr` swap happens in the Stem repo behind its
    differential gate (`compile_diff` / `verify` / `fuzz`).
-6. **Remove `Value`-based API → `1.0`.** Delete the dynamic surface once no
-   consumer depends on it. (Transitional coexistence during phases 2–5 is a
-   migration period, not a shipped compatibility layer.)
+6. **Remove `Value`-based API → `1.0`.** ✅ Done. The dynamic `Value`/`Ast`
+   interpreter, the `parsec_macro` crate, `generate`, and the benchmark are
+   removed; `typed` is promoted to the crate root and the crate has zero runtime
+   dependencies. The typed surface is now the whole crate.
 
 ## Open questions
 

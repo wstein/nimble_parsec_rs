@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
+// NOTE (historical): this reference example uses the pre-rewrite, `Value`-based
+// `nimble_parsec_rs` API, which has since been replaced by the typed
+// `Parser<Output>` surface (see `rust/docs/rfcs/0001-typed-parser.md`). The typed
+// idioms it would now use are demonstrated in `rust/tests/typed_grammar.rs`.
+//
 // Expression top-level tokenizer — a `nimble_parsec_rs` port of the
 // `Stem.Expression` grammar (the BEAM's NimbleParsec `paren_chunk` /
 // `top_level_text_part`). It splits a tag's inner text into top-level `Tok`s

@@ -1,99 +1,91 @@
 # nimble_parsec_rs
 
-This crate is an incremental Rust port of NimbleParsec. It implements the
-runtime combinator surface with parity tests before attempting macro/codegen
-parity. See [PARITY_MATRIX.md](../PARITY_MATRIX.md) for combinator-level status.
+A Rust port of [NimbleParsec](https://github.com/dashbitco/nimble_parsec) with an
+idiomatic, **typed** combinator surface. Each combinator is generic over its
+output, so grammars compose and type-check at compile time with no runtime
+tagging — `literal` yields `&str`, `then` yields a tuple, `repeated` yields a
+`Vec`, and `map` threads any output type through. Zero runtime dependencies.
 
-> **Scope & naming.** This is a runtime-interpreted **plus** codegen port of a
-> _subset_ of NimbleParsec's combinator surface — not a drop-in for the full
-> compile-time `defparsec` macro. The combinator names and semantics mirror
-> NimbleParsec; the output is an untyped `Value` term list (a typed `Parser<T>`
-> surface is the planned 1.0 — see [Roadmap](#roadmap)).
+```rust
+use nimble_parsec_rs::{digits, literal, Parser};
 
-## Implemented
+// "(" digits ")" → the number, as a u32.
+let number = literal("(")
+    .ignore_then(digits())
+    .then_ignore(literal(")"))
+    .map(|ds: &str| ds.parse::<u32>().unwrap());
 
-- Core parser runtime with line/byte cursor tracking
-- Proc-macro scaffold (`compile_parser!`) for compile-time parser expressions
-- Combinators:
-  - `empty`
-  - `concat`
-  - `ignore`
-  - `string`
-  - `ascii_char` with positive and negative predicates (emits the matched byte as an integer codepoint, like NimbleParsec)
-  - `utf8_char` and `utf8_string(predicates, min, max)` with codepoint-range predicates
-  - `ascii_string(predicates, min, max)`
-  - `bytes`, `eos`
-  - `integer_exact`, `integer_min`, `integer_range` (arbitrary precision, matching NimbleParsec's unbounded BEAM integers)
-  - `optional`
-  - `choice`
-  - `repeat(min, max)`, `repeat_while`, `times`, `duplicate`
-  - `eventually`
-  - `lookahead`, `lookahead_not`
-  - `map` (per element), `reduce` (all results into one)
-  - `post_traverse`, `pre_traverse` (low-level result/context transforms)
-  - `tag`, `unwrap_and_tag`, `wrap`, `replace`
-  - `label` (custom failure messages)
-  - `line`, `byte_offset` (position metadata)
-  - `debug` (prints parser state to stderr)
-  - `ParserRef` / `recursive` (forward references for recursive grammars)
-- `generate(&parser, seed)` produces a random accepted input (seeded; round-trips for non-recursive grammars); `generate_with(&parser, seed, GenerateConfig { .. })` tunes recursion depth and the repeat window
+assert_eq!(number.parse("(42)").unwrap(), 42);
+```
 
-  ## Benchmark scaffold
+> **Scope.** A _subset_ of NimbleParsec's combinator surface, reimagined for
+> Rust — the names and semantics mirror NimbleParsec, but the output is a real
+> type rather than NimbleParsec's untyped term list. `&str` input only (for now).
 
-  Criterion benchmarks are available in [benches/parser_bench.rs](benches/parser_bench.rs):
+## Combinators
 
-  - `runtime_builder_parse_datetime`
-  - `proc_macro_builder_parse_datetime`
+Leaves (free functions):
 
-  Run:
+- `literal(&str)` — match an exact string, yielding the slice
+- `any()` — any one character
+- `satisfy(label, pred)` — a character matching a predicate
+- `one_of(set)` / `none_of(set)` — a character in / not in a set
+- `take_while(pred)` / `take_while1(pred)` — a run of matching characters
+- `digits()` — one or more ASCII digits
+- `eof()` — end of input
+- `choice([p; N])` — the first of several same-typed alternatives
+- `lookahead(p)` / `not(p)` — zero-width positive / negative assertions
+- `recursive(|me| …)` — self-referential grammars (depth-bounded)
 
-  ```bash
-  cargo bench
-  ```
+Composition (methods on [`Parser`]):
 
-## Not Yet Ported
+- `.map(f)` / `.try_map(f)` — transform the output (fallibly, for validation)
+- `.to(value)` — replace the output with a constant
+- `.ignored()` — discard the output
+- `.then(p)` / `.ignore_then(p)` / `.then_ignore(p)` — sequence, keeping both / right / left
+- `.or(p)` — ordered alternation
+- `.optional()` — `Option` of the output
+- `.repeated()` / `.repeated_at_least(min)` / `.repeated_in(min, max)` — `Vec` of outputs
+- `.labelled(msg)` — override the failure message
 
-- Compile-time parser generation equivalent to `defparsec/defcombinator`
+Run with `.parse(text)` (requires all input consumed), `.parse_partial(text)`
+(returns the remainder), or the `*_with_max_depth` variants.
 
-Error messages follow NimbleParsec's phrasing (e.g. `expected ASCII character in
-the range "0" to "9"`), but exact `inspect` escaping of non-printable codepoints
-and `integer`'s composite "followed by" message are not byte-identical.
+## Errors
 
-A `ParseFailure` carries both the human-readable `reason` and a structured
-`expected: Vec<String>` — the token/character-class descriptions the parser was
-looking for, unioned across `choice` alternatives. It is empty for failures that
-are not simple expectations (negative assertions, semantic `post_traverse`
-rejections, or the recursion cap). The `cursor` carries line and byte offset.
-
-## Why this split
-
-NimbleParsec's main advantage is compile-time generation into highly optimized BEAM clauses.
-A faithful Rust port likely needs procedural macros and specialized codegen. The runtime substrate here is now a reified `Ast` walked by an interpreter, which both de-risks API/semantics and is the structure codegen would lower. `compile_parser!` is still a validated passthrough; true specialization (emitting generated parsing code that produces identical tokens) remains future work.
+A `ParseFailure` carries the human-readable `reason`, a structured
+`expected: Vec<String>` (the descriptions the parser was looking for, unioned
+across `choice`/`or` alternatives; empty for negative assertions, `try_map`
+rejections, or the recursion cap), and a `cursor` with line and byte offset.
 
 ## Recursion safety
 
-`recursive` / `ParserRef` grammars recurse on the native call stack. To keep
-deeply nested untrusted input from overflowing the stack (an uncatchable abort),
-each parse is bounded by [`DEFAULT_MAX_RECURSION_DEPTH`] (256); exceeding it
-returns a `ParseFailure` rather than crashing. Tune per parse with
-`Parser::parse_with_max_depth(input, max_depth)` (or `run_with_max_depth`) — a
-lower bound to harden against hostile input, a higher one for legitimately deep
-grammars. The default suits release builds on a 2 MiB stack; debug builds have
-larger frames, so lower the cap if you run untrusted input through a debug build.
+`recursive` grammars recurse on the native call stack. To keep deeply nested
+untrusted input from overflowing the stack (an uncatchable abort), each parse is
+bounded by [`DEFAULT_MAX_RECURSION_DEPTH`] (256); exceeding it returns a
+`ParseFailure` rather than crashing. Tune per parse with
+`Parser::parse_with_max_depth(text, max_depth)` — lower to harden against hostile
+input, higher for legitimately deep grammars. The default suits release builds on
+a 2 MiB stack; debug builds have larger frames, so lower the cap if you run
+untrusted input through a debug build.
 
 [`DEFAULT_MAX_RECURSION_DEPTH`]: src/lib.rs
+[`Parser`]: src/typed.rs
+
+## Design
+
+The typed surface is the result of the redesign in
+[`docs/rfcs/0001-typed-parser.md`](docs/rfcs/0001-typed-parser.md), which replaced
+an earlier runtime-interpreted `Value`-based port (and its codegen macro) — the
+generic combinators are monomorphized by the compiler, so no interpreter or
+codegen layer is needed.
 
 ## Roadmap
 
-Acknowledged, scheduled work — not accidents:
-
-- **Typed `Parser<T>` surface (1.0).** Make combinators generic over their output
-  type (à la nom/winnow/chumsky), retiring the dynamic `Value` enum. See the
-  design note in [`docs/rfcs/0001-typed-parser.md`](docs/rfcs/0001-typed-parser.md).
-- **Fuzz corpus.** Complement the property tests with a persisted fuzz corpus
-  (e.g. `cargo-fuzz`) seeded from the existing `generate` facility.
-- **crates.io publication.** Publish `parsec_macro` as its own crate (the
-  metadata is in place) — deferred until there is a second consumer beyond Stem.
+- **Generic input.** Lift the `&str`-only restriction to bytes / custom streams.
+- **More combinators.** `separated_by`, `delimited`, tuple-arity `choice`, folding.
+- **Fuzz corpus.** A persisted `cargo-fuzz` target alongside the property tests.
+- **Benchmarks.** A Criterion suite for the typed combinators.
 
 ## Run tests
 

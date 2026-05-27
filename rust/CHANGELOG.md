@@ -8,35 +8,36 @@ public API (the ~31 combinators, the fluent `Parser` methods, and the `Value` /
 
 ## [Unreleased]
 
+A breaking redesign (RFC 0001): the crate is now a **typed** parser-combinator
+library, replacing the dynamic `Value`-based port.
+
 ### Added
 
-- Typed parser core (`nimble_parsec_rs::typed`, RFC 0001 phase 2): a `Parser<'i>`
-  trait generic over `Output`, composed at compile time with no runtime `Value`
-  tagging — `map`/`then`/`ignore_then`/`then_ignore`/`or`/`optional`/`repeated`/
-  `labelled`, leaves (`literal`/`any`/`satisfy`/`take_while`/`digits`/`eof`), and a
-  boxed `recursive`. Reuses the structured `ParseFailure` and the recursion cap;
-  lives beside the `Value` API during the migration to a typed surface.
-  Phase 3 adds `to`, `try_map`, `lookahead`, `not`, `one_of`, `none_of`, bounded
-  `repeated_in`, and n-way `choice`.
-- Structured parse errors: `ParseFailure` now carries an `expected: Vec<String>`
-  alongside `reason` — the token/character-class descriptions the parser was
-  looking for, unioned across `choice` alternatives, and empty for non-expectation
-  failures (negative assertions, semantic rejections, the recursion cap). New
-  `ParseFailure::expecting` / `ParseFailure::rejected` constructors.
-- Recursion-depth cap on the interpreter: deeply nested input now returns a
-  `ParseFailure` ("maximum recursion depth exceeded") instead of overflowing the
-  native call stack. Configurable per parse via `Parser::parse_with_max_depth` /
-  `Parser::run_with_max_depth`; the default is `DEFAULT_MAX_RECURSION_DEPTH`
-  (256, sized for release builds on a 2 MiB stack).
-- Property-based tests (`proptest`) covering totality/monotonicity, the
-  `generate` round-trip contract, and recursion safety.
-- crates.io publication metadata (`repository`, `keywords`, `categories`,
-  `readme`, `rust-version`) and an explicit `1.70` MSRV.
+- Typed `Parser<Output>` surface (`nimble_parsec_rs::typed`, re-exported at the
+  crate root): generic over its output and composed at compile time with no
+  runtime tagging. Leaves `literal`/`any`/`satisfy`/`one_of`/`none_of`/
+  `take_while`/`take_while1`/`digits`/`eof`/`choice`/`lookahead`/`not`/
+  `recursive`; methods `map`/`try_map`/`to`/`ignored`/`then`/`ignore_then`/
+  `then_ignore`/`or`/`optional`/`repeated`/`repeated_at_least`/`repeated_in`/
+  `labelled`; run via `parse`/`parse_partial` (and the `*_with_max_depth`
+  variants).
+- Structured parse errors: `ParseFailure { reason, expected, rest, cursor }` with
+  `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
+  and empty for non-expectation failures (negative assertions, `try_map`
+  rejections, the recursion cap).
+- Recursion-depth cap (`DEFAULT_MAX_RECURSION_DEPTH`, default 256), overridable
+  via `Parser::parse_with_max_depth`, returning a `ParseFailure` instead of
+  overflowing the stack.
+- Property-based tests (`proptest`), publication metadata, and a `1.70` MSRV.
 
-### Changed
+### Removed
 
-- README documents the crate's scope (a runtime + codegen port of a *subset* of
-  NimbleParsec, not the full compile-time `defparsec` macro) and a roadmap.
+- **BREAKING:** the dynamic `Value`/`Ast` interpreter and its API
+  (`Parser`/`ParserRef`/`choice`/`repeat`/`tag`/`reduce`/`post_traverse`/… over
+  `Vec<Value>`), the `compile_parser!`/`defparsec!` codegen macros and the
+  `parsec_macro` crate, the `generate` input synthesizer, and the Criterion
+  benchmark. With them go the `num-bigint` and `rand` dependencies — the crate
+  now has **zero runtime dependencies**.
 
 ## [0.1.0]
 

@@ -1,5 +1,12 @@
 # NimbleParsec → Rust Combinator Parity Matrix
 
+> **Superseded (2026-05-27).** This matrix tracked the original runtime-interpreted,
+> `Value`-based port and its codegen performance. The crate has since been rewritten
+> to a typed `Parser<Output>` surface (see
+> [rust/docs/rfcs/0001-typed-parser.md](rust/docs/rfcs/0001-typed-parser.md)); the
+> combinator inventory and benchmark figures below no longer reflect the code.
+> Retained as historical context.
+
 Combinator-by-combinator comparison of the Elixir public API in
 [lib/nimble_parsec.ex](lib/nimble_parsec.ex) against the Rust port in
 [rust/src/lib.rs](rust/src/lib.rs).

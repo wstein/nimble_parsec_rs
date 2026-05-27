@@ -4,7 +4,15 @@
 
 _Status: **verified against crate source 2026-05-27**. Audience: maintainers of `wstein/nimble_parsec_rs` before its first tagged release. Scope: the Rust port of Elixir's NimbleParsec, as consumed by Stem's native front end._
 
-> **Revision note (2026-05-27).** An earlier draft of this document was _synthesized from inference_ — it explicitly warned that several findings were "inferences from the consuming code, not confirmed against the crate source" and "must be verified before being treated as fact." Those findings have now been checked directly against [`rust/src/lib.rs`](../rust/src/lib.rs), [`rust/parsec_macro/src/lib.rs`](../rust/parsec_macro/src/lib.rs), [`rust/tests/`](../rust/tests/), and [`rust/benches/parser_bench.rs`](../rust/benches/parser_bench.rs). **Most of the earlier "blockers" did not survive that check** and are corrected below. One — unbounded recursion — was confirmed, and has since been fixed. This revision supersedes the inferred version.
+> **Superseded (2026-05-27).** The crate has since been **rewritten to a typed-only
+> API** (see [`rust/docs/rfcs/0001-typed-parser.md`](../rust/docs/rfcs/0001-typed-parser.md)):
+> the dynamic `Value`/`Ast` interpreter, the `parsec_macro` codegen crate, and the
+> benchmark were removed and `typed` was promoted to the whole crate. That
+> resolves §2.1 (codegen) and §2.2 (the `Value` enum) **by removal** rather than
+> as described below. This review is retained as historical context for the
+> pre-rewrite crate; treat the typed RFC as the current source of truth.
+>
+> **Revision note (2026-05-27).** An earlier draft of this document was _synthesized from inference_ — it explicitly warned that several findings were "inferences from the consuming code, not confirmed against the crate source" and "must be verified before being treated as fact." Those findings were then checked directly against the crate source (`rust/src/lib.rs`, the `parsec_macro` crate, `rust/tests/`, and the Criterion benchmark — the latter two of which the typed rewrite has since removed). **Most of the earlier "blockers" did not survive that check** and are corrected below. One — unbounded recursion — was confirmed, and has since been fixed. This revision supersedes the inferred version.
 
 ---
 

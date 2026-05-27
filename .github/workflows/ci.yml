@@ -75,6 +75,3 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
       - run: cargo test
-
-      # Compile-smoke the Criterion benchmarks without running them.
-      - run: cargo bench --no-run

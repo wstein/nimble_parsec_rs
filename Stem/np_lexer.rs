@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
+// NOTE (historical): this reference example uses the pre-rewrite, `Value`-based
+// `nimble_parsec_rs` API, which has since been replaced by the typed
+// `Parser<Output>` surface (see `rust/docs/rfcs/0001-typed-parser.md`). For the
+// typed equivalent of this lexer — text/tags/comments folded into a typed token
+// enum with no `Value` tagging — see `rust/tests/typed_grammar.rs`.
+//
 // Combinator lexer — a `nimble_parsec_rs` port of `Stem.Parser`'s lexer, sharing
 // one conceptual model with the BEAM reference. `do_lex` (the combinator grammar)
 // recognizes the raw lexical units (text runs, comments, raw blocks, `{{{ }}}`
