@@ -8,10 +8,53 @@ public API (the ~31 combinators, the fluent `Parser` methods, and the `Value` /
 
 ## [Unreleased]
 
-A breaking redesign (RFC 0001): the crate is now a **typed** parser-combinator
-library, replacing the dynamic `Value`-based port.
+### Generic and binary input (feat/generic-binary) — BREAKING
 
-### Added
+The crate now supports `&[u8]` (binary) input alongside `&str` (text), with
+`Partial<S>` for streaming (incomplete-input) parsing. All leaf parsers and the
+`Stream` abstraction are part of the public API.
+
+#### Added in feat/generic-binary
+
+- **`Stream` trait** (`lib.rs`): describes a parser input sequence. Associated
+  items: `Token` (element type — `char` for `&str`, `u8` for `&[u8]`), `Slice`
+  (multi-token output type), and `PARTIAL: bool` (`false` for complete input,
+  `true` for `Partial<S>`). Implemented for `&str`, `&[u8]`, and `Partial<S>`.
+- **`Compare<Pat>` trait** (`lib.rs`): type-safe pattern matching used by
+  `literal` and `byte`. Implemented for `&str`/`&str`, `&[u8]`/`&[u8]`, and
+  `&[u8]`/`u8`.
+- **`Partial<S>` wrapper type**: wraps `&str` or `&[u8]` to signal incomplete
+  input. Parsers propagate `Incomplete` upwards instead of hard-failing when
+  more data is needed.
+- **Binary leaf parsers** (available when `S = &[u8]` or `Partial<&[u8]>`):
+  `byte(b)`, `byte_range(lo, hi)`, `be_u8/16/32/64`, `le_u8/16/32/64`,
+  `utf8_char()`, `take(n)`, `bytes(n)` (alias for `take(n)`), `rest()`.
+- **`take(n)`** generalises the old text-only `bytes(n)`: yields `&[u8]` on
+  byte-slice input and `&str` on text input. `bytes(n)` is retained as an alias.
+
+#### Changed in feat/generic-binary (BREAKING)
+
+- **All leaf parser constructors are now generic over `S: Stream`**: `any<S>()`,
+  `satisfy<S, F>()`, `literal<S, Pat>()`, `take<S>()`, `bytes<S>()`, `eof<S>()`,
+  `empty<S>()`, etc. Rust infers `S` from context in almost all cases; a type
+  annotation is only required in generate-only or otherwise ambiguous contexts
+  (e.g. `literal::<&str, _>("x")`).
+- **`Recursive<'a, S, O>`**: the `recursive` combinator now carries an explicit
+  `Stream` type parameter `S` and a lifetime `'a`. Existing `&str`-only uses
+  require adding `&str` as the stream type; the lifetime is inferred.
+- **Error messages updated for generic input**:
+  - `"expected any character"` → `"expected any token"`
+  - `"expected at least one matching character"` → `"expected at least one matching token"`
+  - `"expected N base units"` → `"expected N bytes"`
+
+---
+
+### Typed parser redesign (RFC 0001) — BREAKING
+
+A breaking redesign: the crate is now a **typed** parser-combinator library,
+replacing the dynamic `Value`-based port.
+
+#### Added in RFC-0001
 
 - Typed `Parser<Output>` surface (`nimble_parsec_rs::typed`, re-exported at the
   crate root): generic over its output and composed at compile time with no
@@ -67,7 +110,7 @@ library, replacing the dynamic `Value`-based port.
   overflowing the stack.
 - Property-based tests (`proptest`), publication metadata, and a `1.70` MSRV.
 
-### Removed
+#### Removed in RFC-0001
 
 - **BREAKING:** the dynamic `Value`/`Ast` interpreter and its API
   (`Parser`/`ParserRef`/`choice`/`repeat`/`tag`/`reduce`/`post_traverse`/… over

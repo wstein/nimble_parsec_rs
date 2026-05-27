@@ -30,7 +30,7 @@ Status legend:
 | `integer` | `integer()` | ✅ | A digit run parsed into `i64` (overflow → error). Use `digits().try_map(...)` for other widths or a sign. |
 | `eos` | `eof` (alias `eos`) | ✅ | End-of-input assertion. |
 | `empty` | `empty()` | ✅ | Always succeeds, consuming nothing; handy as a final `choice` branch. |
-| `bytes` | `bytes(n)` | ✅ | Consumes exactly `n` bytes as `&str`; `n` must land on a UTF-8 character boundary. Arbitrary non-UTF-8 byte parsing still awaits byte-slice input. |
+| `bytes` | `take(n)` / `bytes(n)` | ✅ | On `&str` input: consumes exactly `n` bytes as `&str`, `n` must land on a UTF-8 boundary. On `&[u8]` input: consumes exactly `n` bytes as `&[u8]`. `bytes` is an alias for `take`. |
 
 ## Combination & control flow
 
@@ -77,6 +77,23 @@ Status legend:
 | `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | plain `fn … -> impl Parser` | ➖ | The codegen macros existed to specialize the runtime interpreter; typed combinators are already monomorphized by the compiler, so a named parser is just a function. |
 | `quoted_*` traversal variants | — | ➖ | Compile-time forms of `post_traverse`/`repeat_while`; no analogue in a non-macro design. |
 
+## Binary and streaming input (no direct NimbleParsec equivalent)
+
+NimbleParsec targets Elixir binaries/bitstrings; the Rust port exposes these
+through a generic `Stream` trait and dedicated binary leaf parsers.
+
+| Rust (typed) | Status | Notes |
+| --- | --- | --- |
+| `Stream` trait (`Token`, `Slice`, `PARTIAL`) | ✅ | Abstracts over `&str` (Token=`char`) and `&[u8]` (Token=`u8`). All leaf parsers are generic over `S: Stream`. |
+| `Compare<Pat>` trait | ✅ | Type-safe literal matching used by `literal` and `byte`; impl'd for `&str`/`&str`, `&[u8]`/`&[u8]`, `&[u8]`/`u8`. |
+| `Partial<S>` | ✅ | Streaming wrapper (`S::PARTIAL = true`); parsers propagate `Incomplete` instead of hard-failing on truncated input. |
+| `byte(b)` | ✅ | Match one exact byte value; yields `u8`. |
+| `byte_range(lo, hi)` | ✅ | Match a byte in `lo..=hi`; yields `u8`. |
+| `be_u8/16/32/64`, `le_u8/16/32/64` | ✅ | Fixed-width big/little-endian integer parsers on `&[u8]`. |
+| `utf8_char()` | ✅ | Decode one UTF-8 scalar from `&[u8]`; yields `char`. |
+| `rest()` | ✅ | Consume and yield all remaining bytes as `&[u8]`. |
+| `Recursive<'a, S, O>` | ✅ | `recursive` now carries an explicit stream type `S` and lifetime `'a`. |
+
 ## Rust additions (no direct NimbleParsec name)
 
 | Rust (typed) | Purpose |
@@ -104,9 +121,8 @@ calls because the output is already typed, and the `defparsec`/`defcombinator`
 codegen family is obsolete because the compiler monomorphizes the combinators
 directly.
 
-Outstanding (tracked in [rust/README.md](rust/README.md)): generic / binary
-(non-UTF-8) input — the surface is `&str`-only, so `bytes` requires UTF-8 boundaries
-and there is no byte/bitstring parsing. This is the one remaining structural gap;
-the README's _Scope & limitations_ covers the consequences and workarounds, and
-recommends [`nom`](https://crates.io/crates/nom) / [`winnow`](https://crates.io/crates/winnow)
-(both `&[u8]`-capable) for genuinely binary or bit-level input.
+The typed surface covers NimbleParsec's everyday grammar-building set for both
+text (`&str`) and binary (`&[u8]`) input. The `Stream` trait unifies both: leaf
+parsers are generic over `S`, and `Partial<S>` adds streaming support. The one
+remaining structural gap is bit-level parsing (no `bits`/`bit_count` combinator);
+see [rust/README.md](rust/README.md) _Scope & limitations_ for details.

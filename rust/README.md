@@ -4,7 +4,9 @@ A Rust port of [NimbleParsec](https://github.com/dashbitco/nimble_parsec) with a
 idiomatic, **typed** combinator surface. Each combinator is generic over its
 output, so grammars compose and type-check at compile time with no runtime
 tagging — `literal` yields `&str`, `then` yields a tuple, `repeated` yields a
-`Vec`, and `map` threads any output type through. Zero runtime dependencies.
+`Vec`, and `map` threads any output type through. Input is generic: `&str` for
+text and `&[u8]` for binary data are both first-class; `Partial<S>` wraps either
+for streaming (incomplete-input) parsing. Zero runtime dependencies.
 
 ```rust
 use nimble_parsec_rs::{digits, literal, Parser};
@@ -20,7 +22,8 @@ assert_eq!(number.parse("(42)").unwrap(), 42);
 
 > **Scope.** A _subset_ of NimbleParsec's combinator surface, reimagined for
 > Rust — the names and semantics mirror NimbleParsec, but the output is a real
-> type rather than NimbleParsec's untyped term list. `&str` input only (for now).
+> type rather than NimbleParsec's untyped term list. Input is generic: `&str`
+> for text, `&[u8]` for binary data, `Partial<S>` for streaming.
 
 ## Combinators
 
@@ -33,7 +36,7 @@ Leaves (free functions):
 - `take_while(pred)` / `take_while1(pred)` — a run of matching characters
 - `digits()` — one or more ASCII digits (as `&str`)
 - `integer()` — a run of digits parsed into an `i64`
-- `bytes(n)` — exactly `n` bytes as a `&str` (must land on a UTF-8 boundary)
+- `take(n)` / `bytes(n)` — exactly `n` tokens (alias: `bytes` is `take` for `&[u8]`)
 - `eof()` — end of input
 - `empty()` — always succeeds, consuming nothing
 - `eventually(p)` — skip input until `p` matches, then return its output
@@ -74,6 +77,81 @@ A `ParseFailure` carries the human-readable `reason`, a structured
 `expected: Vec<String>` (the descriptions the parser was looking for, unioned
 across `choice`/`or` alternatives; empty for negative assertions, `try_map`
 rejections, or the recursion cap), and a `cursor` with line and byte offset.
+
+## Generic and binary input
+
+All leaf parsers are generic over a `Stream` type parameter `S`:
+
+```rust
+// Text parsing — S = &str, Token = char
+let p = literal::<&str, _>("GET ").ignore_then(take_while(|c: char| c != '\n'));
+
+// Binary parsing — S = &[u8], Token = u8
+use nimble_parsec_rs::{byte, be_u16, take};
+let frame = byte(0x01_u8)
+    .ignore_then(be_u16())
+    .flat_map(|len| take(len as usize));
+```
+
+### `Stream` trait
+
+The `Stream` trait (in `lib.rs`) describes an input sequence:
+
+| Associated item | Meaning |
+| --- | --- |
+| `Token` | The element type — `char` for `&str`, `u8` for `&[u8]` |
+| `Slice` | The type returned by multi-token parsers — `&str` or `&[u8]` |
+| `PARTIAL: bool` | `false` for complete input; `true` for `Partial<S>` streaming |
+
+Implementations ship for `&str`, `&[u8]`, and `Partial<S>` (wraps either for
+streaming).
+
+### `Compare<Pat>` trait
+
+`Compare<Pat>` is how `literal` / `byte` perform type-safe pattern matching.
+Implemented for:
+
+- `&str` with a `&str` pattern
+- `&[u8]` with a `&[u8]` pattern
+- `&[u8]` with a single `u8`
+
+### Binary leaf parsers
+
+Available when `S = &[u8]` (or `Partial<&[u8]>`):
+
+| Parser | Output | Description |
+| --- | --- | --- |
+| `byte(b)` | `u8` | Match one exact byte |
+| `byte_range(lo, hi)` | `u8` | Match a byte in `lo..=hi` |
+| `be_u8()` / `le_u8()` | `u8` | Single byte |
+| `be_u16()` / `le_u16()` | `u16` | 2-byte big/little-endian |
+| `be_u32()` / `le_u32()` | `u32` | 4-byte big/little-endian |
+| `be_u64()` / `le_u64()` | `u64` | 8-byte big/little-endian |
+| `utf8_char()` | `char` | Decode one UTF-8 scalar from `&[u8]` |
+| `take(n)` | `&[u8]` | Exactly `n` bytes |
+| `bytes(n)` | `&[u8]` | Alias for `take(n)` |
+| `rest()` | `&[u8]` | All remaining bytes |
+
+### Streaming with `Partial<S>`
+
+Wrap a slice in `Partial` to signal that the input may be incomplete:
+
+```rust
+use nimble_parsec_rs::{Partial, be_u32};
+
+let result = be_u32::<Partial<&[u8]>>().parse_partial(Partial(&[0x00, 0x00]));
+// returns Err(Incomplete) — more bytes are needed
+```
+
+`Partial<S>` sets `S::PARTIAL = true`; parsers that see `Incomplete` propagate
+it up rather than reporting a hard failure. Complete-input parsers (`&str`,
+`&[u8]`) use `PARTIAL = false` and never produce `Incomplete`.
+
+### `Recursive<'a, S, O>`
+
+The `recursive` combinator now carries an explicit lifetime `'a` and stream
+type `S`: `Recursive<'a, S, Output>`. Existing text-only uses just add `&str`
+as the stream type annotation; the lifetime is almost always inferred.
 
 ## Recursion safety
 
@@ -116,33 +194,24 @@ codegen layer is needed.
 
 ## Scope & limitations
 
-This crate parses **UTF-8 text** (`&str`). That is the right surface for
-templates, config, DSLs, and source — its intended use — and combinator-level
-parity with NimbleParsec is complete. The one structural gap is input type:
+This crate targets **UTF-8 text** (`&str`) and **binary data** (`&[u8]`). That
+covers templates, config files, DSLs, source code, binary file formats, and wire
+protocols. Combinator-level parity with NimbleParsec is complete. Remaining
+structural gaps:
 
-- **No `&[u8]` / binary / bitstring input.** You cannot parse non-UTF-8 bytes,
-  binary file formats or wire protocols, or bit-level fields. `bytes(n)` advances
-  _n bytes of text_ and must land on a UTF-8 boundary; it yields `&str`, not raw
-  bytes. Other encodings (Latin-1, …) must be transcoded to UTF-8 first.
-- **Workarounds (see [`tests/binary_workarounds.rs`](tests/binary_workarounds.rs)):**
-  transcode foreign encodings up front; carry binary as hex/base64 text and decode
-  in `.try_map`; use `bytes(n)` for fixed-width fields; and `.flat_map` for
-  dynamic length-prefixed fields (e.g. netstrings).
-- **When to reach for something else.** For genuinely binary, bit-level, or
-  large non-UTF-8 input, use [`nom`](https://crates.io/crates/nom) or
-  [`winnow`](https://crates.io/crates/winnow) — both parse `&[u8]` (and `nom`
-  has a `bits` sub-module). This crate deliberately stays focused on typed text
-  parsing rather than competing there.
+- **No bit-level parsing.** There is no `bits`/`bit_count` combinator. For
+  bit-level fields, use [`nom`](https://crates.io/crates/nom) (which has a
+  `bits` sub-module) or [`winnow`](https://crates.io/crates/winnow).
+- **No custom stream types beyond `&str` / `&[u8]` / `Partial<S>`.** The
+  `Stream` trait is public and can be implemented for custom slices, but there
+  are no built-in adapters for `&[T]` where `T` is not `u8`.
 
 ## Roadmap
 
-- **Generic input.** Lift the `&str`-only restriction to bytes / custom streams
-  (à la winnow's `Stream` trait) — the one change that would close the gap above.
-  It touches `Input`, every leaf, and position tracking, so it is its own
-  milestone (see [`docs/rfcs/0001-typed-parser.md`](docs/rfcs/0001-typed-parser.md)
-  §non-goals).
 - **Fuzz corpus.** A persisted `cargo-fuzz` target alongside the property tests.
 - **Benchmarks.** A Criterion suite for the typed combinators.
+- **Bit-level parsing.** A `bits` sub-combinator for parsing individual bits or
+  sub-byte fields from `&[u8]`.
 
 ## Run tests
 
