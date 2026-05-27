@@ -25,6 +25,11 @@ library, replacing the dynamic `Value`-based port.
   `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
   and empty for non-expectation failures (negative assertions, `try_map`
   rejections, the recursion cap).
+- Position, debug, and generation combinators: `.with_byte_offset()` and
+  `.with_line()` pair the output with the trailing position (NimbleParsec's
+  `byte_offset` / `line`); `.debug(label)` traces a parser to stderr; and
+  `generate(&parser, seed)` synthesizes a random accepted input for non-recursive
+  grammars (via the `Generate` trait and a dependency-free PRNG).
 - Recursion-depth cap (`DEFAULT_MAX_RECURSION_DEPTH`, default 256), overridable
   via `Parser::parse_with_max_depth`, returning a `ParseFailure` instead of
   overflowing the stack.

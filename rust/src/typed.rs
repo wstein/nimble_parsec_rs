@@ -269,6 +269,34 @@ pub trait Parser<'i> {
     {
         Labelled { inner: self, label }
     }
+
+    /// Pairs the output with the byte offset reached after the match
+    /// (NimbleParsec's `byte_offset`).
+    fn with_byte_offset(self) -> WithByteOffset<Self>
+    where
+        Self: Sized,
+    {
+        WithByteOffset { inner: self }
+    }
+
+    /// Pairs the output with the position reached after the match — `(1-based
+    /// line, byte offset of the start of that line)` (NimbleParsec's `line`).
+    fn with_line(self) -> WithLine<Self>
+    where
+        Self: Sized,
+    {
+        WithLine { inner: self }
+    }
+
+    /// Traces this parser to stderr (the position on entry and the outcome on
+    /// exit), passing the output through unchanged (NimbleParsec's `debug`).
+    /// `label` identifies the parser in the trace.
+    fn debug(self, label: &'static str) -> Debug<Self>
+    where
+        Self: Sized,
+    {
+        Debug { inner: self, label }
+    }
 }
 
 // ── Combinators ──────────────────────────────────────────────────────────────
@@ -541,6 +569,59 @@ impl<'i, P: Parser<'i>> Parser<'i> for Labelled<P> {
     }
 }
 
+/// [`Parser::with_byte_offset`].
+pub struct WithByteOffset<P> {
+    inner: P,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for WithByteOffset<P> {
+    type Output = (P::Output, usize);
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, (P::Output, usize)> {
+        let out = self.inner.parse_next(input)?;
+        Ok((out, input.cursor.byte_offset))
+    }
+}
+
+/// [`Parser::with_line`].
+pub struct WithLine<P> {
+    inner: P,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for WithLine<P> {
+    type Output = (P::Output, (usize, usize));
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, (P::Output, (usize, usize))> {
+        let out = self.inner.parse_next(input)?;
+        Ok((out, (input.cursor.line, input.cursor.line_start_offset)))
+    }
+}
+
+/// [`Parser::debug`].
+pub struct Debug<P> {
+    inner: P,
+    label: &'static str,
+}
+
+impl<'i, P: Parser<'i>> Parser<'i> for Debug<P> {
+    type Output = P::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+        let before = input.cursor;
+        let preview: String = input.rest.chars().take(24).collect();
+        eprintln!(
+            "[nimble_parsec_rs] {}: enter at line {}, byte {} — rest {preview:?}",
+            self.label, before.line, before.byte_offset
+        );
+        let result = self.inner.parse_next(input);
+        match &result {
+            Ok(_) => eprintln!(
+                "[nimble_parsec_rs] {}: ok, now at byte {}",
+                self.label, input.cursor.byte_offset
+            ),
+            Err(err) => eprintln!("[nimble_parsec_rs] {}: failed — {}", self.label, err.reason),
+        }
+        result
+    }
+}
+
 // ── Leaves ───────────────────────────────────────────────────────────────────
 
 /// [`literal`].
@@ -806,4 +887,236 @@ where
     let definition = build(handle.clone());
     let _ = handle.cell.set(Box::new(definition));
     handle
+}
+
+// ── Generation ───────────────────────────────────────────────────────────────
+
+/// Deterministic source of randomness for [`generate`]. Opaque; seeded by
+/// `generate`'s `seed`. Implementations of [`Generate`] thread one of these to
+/// sample alternatives, repetition counts, and characters.
+pub struct Gen {
+    state: u64,
+}
+
+impl Gen {
+    fn new(seed: u64) -> Self {
+        Gen {
+            state: seed ^ 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+
+    // splitmix64 — a tiny, dependency-free PRNG, ample for sampling grammars.
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A value in `0..n` (0 when `n == 0`).
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    fn coin(&mut self) -> bool {
+        self.next_u64() & 1 == 1
+    }
+
+    // A character satisfying `pred`, sampled from a printable pool (then a wider
+    // ASCII scan). Best-effort: a predicate matching no printable ASCII yields a
+    // fallback that may not round-trip.
+    fn char_matching(&mut self, pred: &dyn Fn(char) -> bool) -> char {
+        const POOL: &[u8] =
+            b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.,:;/()[]";
+        let start = self.below(POOL.len());
+        for i in 0..POOL.len() {
+            let c = POOL[(start + i) % POOL.len()] as char;
+            if pred(c) {
+                return c;
+            }
+        }
+        for cp in 0x20u32..0x7f {
+            if let Some(c) = char::from_u32(cp) {
+                if pred(c) {
+                    return c;
+                }
+            }
+        }
+        'a'
+    }
+}
+
+/// Produces a random input that the parser accepts, mirroring NimbleParsec's
+/// `generate`. Implemented for the built-in combinators except [`Recursive`], so
+/// [`generate`] type-checks only for **non-recursive** grammars.
+///
+/// Generation is best-effort: it round-trips for grammars built from literals,
+/// sequencing, alternation, optionality, and repetition, but negative assertions
+/// ([`not`]) and predicates that exclude printable ASCII may yield input the
+/// parser then rejects.
+pub trait Generate {
+    /// Appends one sampled instance of this parser's accepted input to `out`.
+    fn generate_into(&self, gen: &mut Gen, out: &mut String);
+}
+
+/// Generates a random input accepted by `parser`, seeded by `seed` for
+/// reproducibility. Only available for non-recursive grammars (see [`Generate`]).
+pub fn generate<G: Generate>(parser: &G, seed: u64) -> String {
+    let mut gen = Gen::new(seed);
+    let mut out = String::new();
+    parser.generate_into(&mut gen, &mut out);
+    out
+}
+
+impl Generate for Literal {
+    fn generate_into(&self, _gen: &mut Gen, out: &mut String) {
+        out.push_str(self.lit);
+    }
+}
+
+impl Generate for AnyChar {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        out.push(gen.char_matching(&|_| true));
+    }
+}
+
+impl<F: Fn(char) -> bool> Generate for Satisfy<F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        out.push(gen.char_matching(&self.pred));
+    }
+}
+
+impl<F: Fn(char) -> bool> Generate for TakeWhile<F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        let count = self.min + gen.below(3);
+        for _ in 0..count {
+            out.push(gen.char_matching(&self.pred));
+        }
+    }
+}
+
+impl Generate for Eof {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+impl<P: Generate, const N: usize> Generate for Choice<P, N> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        if N > 0 {
+            self.parsers[gen.below(N)].generate_into(gen, out);
+        }
+    }
+}
+
+impl<P: Generate, F> Generate for Map<P, F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate, F> Generate for TryMap<P, F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate, V> Generate for To<P, V> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate> Generate for Ignored<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate> Generate for Labelled<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate> Generate for WithByteOffset<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate> Generate for WithLine<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate> Generate for Debug<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<A: Generate, B: Generate> Generate for Then<A, B> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.first.generate_into(gen, out);
+        self.second.generate_into(gen, out);
+    }
+}
+
+impl<A: Generate, B: Generate> Generate for IgnoreThen<A, B> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.first.generate_into(gen, out);
+        self.second.generate_into(gen, out);
+    }
+}
+
+impl<A: Generate, B: Generate> Generate for ThenIgnore<A, B> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.first.generate_into(gen, out);
+        self.second.generate_into(gen, out);
+    }
+}
+
+impl<A: Generate, B: Generate> Generate for Or<A, B> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        if gen.coin() {
+            self.a.generate_into(gen, out);
+        } else {
+            self.b.generate_into(gen, out);
+        }
+    }
+}
+
+impl<P: Generate> Generate for Opt<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        if gen.coin() {
+            self.inner.generate_into(gen, out);
+        }
+    }
+}
+
+impl<P: Generate> Generate for Repeated<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        let mut count = self.min + gen.below(3);
+        if let Some(max) = self.max {
+            count = count.min(max);
+        }
+        for _ in 0..count {
+            self.inner.generate_into(gen, out);
+        }
+    }
+}
+
+// Zero-width assertions contribute no input — and need no inner `Generate`, so a
+// grammar can still be generatable even with a non-generatable assertion inside.
+impl<P> Generate for Lookahead<P> {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+impl<P> Generate for Not<P> {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
 }

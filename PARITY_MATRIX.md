@@ -55,21 +55,21 @@ Status legend:
 | `reduce` | `.repeated().map(fold)` | 🧩 | Fold the `Vec<O>` in a `.map`; no dedicated `reduce`. |
 | `tag` / `unwrap_and_tag` | `.map(\|o\| …)` | 🧩 | Tagging is just `.map` into a typed value/enum variant — the dynamic tag is unnecessary. |
 | `wrap` | `.map(\|o\| vec![o])` | 🧩 | The output is already typed; wrap with `.map` if a `Vec` is wanted. |
-| `debug` | — | ❌ | No debug combinator yet. |
+| `debug` | `.debug(label)` | ✅ | Traces the parser to stderr (entry position + outcome), passing the output through. |
 
 ## Position metadata
 
 | Elixir | Rust (typed) | Status | Notes |
 | --- | --- | --- | --- |
-| `byte_offset` | — | ❌ | The parse tracks a `Cursor` (line + byte offset), surfaced on `ParseFailure`, but no combinator emits position into a success value yet. |
-| `line` | — | ❌ | As above. |
+| `byte_offset` | `.with_byte_offset()` | ✅ | Pairs the output with the trailing byte offset: `(O, usize)`. |
+| `line` | `.with_line()` | ✅ | Pairs the output with `(1-based line, byte offset of the line start)`: `(O, (usize, usize))`. |
 
 ## Recursion, generation & definition macros
 
 | Elixir | Rust (typed) | Status | Notes |
 | --- | --- | --- | --- |
 | `parsec` | `recursive` | ✅ | Forward-declared, self-referential parser (boxed); depth-bounded by the recursion cap. |
-| `generate` | — | ❌ | Seeded input synthesis was dropped in the typed rewrite; could return as a typed feature. |
+| `generate` | `generate(&p, seed)` | ✅ | Seeded input synthesis for **non-recursive** grammars (the `Generate` trait, enforced by trait bounds); dependency-free PRNG. Best-effort with negative assertions / restrictive predicates. |
 | `defparsec` / `defparsecp` / `defcombinator` / `defcombinatorp` | plain `fn … -> impl Parser` | ➖ | The codegen macros existed to specialize the runtime interpreter; typed combinators are already monomorphized by the compiler, so a named parser is just a function. |
 | `quoted_*` traversal variants | — | ➖ | Compile-time forms of `post_traverse`/`repeat_while`; no analogue in a non-macro design. |
 
@@ -97,6 +97,6 @@ codegen family is obsolete because the compiler monomorphizes the combinators
 directly.
 
 Outstanding (tracked in [rust/README.md](rust/README.md)): generic (non-`&str`)
-input — which unblocks `bytes`; position-metadata combinators (`byte_offset`,
-`line`); a `debug` combinator; restoring `generate`; and convenience combinators
-such as `separated_by` / `delimited` and a tuple-arity `choice`.
+input — which unblocks `bytes`; threaded user `context` for `post_traverse` /
+`pre_traverse`; and convenience combinators such as `separated_by` / `delimited`
+and a tuple-arity `choice`.

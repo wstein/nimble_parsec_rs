@@ -47,9 +47,16 @@ Composition (methods on [`Parser`]):
 - `.optional()` — `Option` of the output
 - `.repeated()` / `.repeated_at_least(min)` / `.repeated_in(min, max)` — `Vec` of outputs
 - `.labelled(msg)` — override the failure message
+- `.with_byte_offset()` / `.with_line()` — pair the output with the trailing byte offset / `(line, line-start offset)` (NimbleParsec's `byte_offset` / `line`)
+- `.debug(label)` — trace the parser to stderr, passing the output through
 
 Run with `.parse(text)` (requires all input consumed), `.parse_partial(text)`
 (returns the remainder), or the `*_with_max_depth` variants.
+
+`generate(&parser, seed)` synthesizes a random input the parser accepts (seeded,
+reproducible) — available for non-recursive grammars; see [`Generate`].
+
+[`Generate`]: src/typed.rs
 
 ## Errors
 
