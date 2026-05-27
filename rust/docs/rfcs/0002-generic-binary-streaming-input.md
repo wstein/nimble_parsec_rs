@@ -16,7 +16,7 @@ single combinator set:
 2. **Arbitrary bytes** (`&[u8]`) — non-UTF-8 binary formats, byte-oriented;
 3. **Token slices** (`&[T]`) — a lexer feeding a second parser stage (the
    abstraction should permit it; impl can land later);
-4. **Streaming / partial input** — parse a buffer that may be a *prefix* of the
+4. **Streaming / partial input** — parse a buffer that may be a _prefix_ of the
    full input, signalling "need more bytes" rather than a hard failure, so large
    inputs can be processed incrementally.
 
@@ -50,7 +50,7 @@ ahead of NimbleParsec (which is complete-input only).
 
 ## Current architecture & `&str` coupling points
 
-The coupling is **localized**. Combinators that only *thread* the input (`Map`,
+The coupling is **localized**. Combinators that only _thread_ the input (`Map`,
 `Then`, `Or`, `Repeated`, `Opt`, `Delimited`, `SeparatedBy`, `Choice`,
 `Recursive`, …) never touch `&str` — they call `parse_next` and snapshot/restore
 the input. The `&str` assumptions live in a small set of places:
@@ -76,12 +76,12 @@ Everything else is reusable as-is. That is what makes the recommended design
 ## Reference designs: nom vs winnow
 
 **nom** (byte-first heritage; `&[u8]` canonical, `&str` supported):
-- Generic input via a *galaxy of traits* — historically `InputTake`,
+- Generic input via a _galaxy of traits_ — historically `InputTake`,
   `InputIter`, `InputLength`, `Slice<Range>`, `Compare`, `FindSubstring`,
   `FindToken`, `Offset`, `AsBytes`, `AsChar`… (nom 8 consolidated these into one
   `Input` trait + an `OutputMode`). Bounds are verbose but very general.
 - **Streaming is a separate module**: `nom::number::streaming` vs `::complete`,
-  `nom::bytes::streaming` vs `::complete` — *every combinator is written twice*.
+  `nom::bytes::streaming` vs `::complete` — _every combinator is written twice_.
   Streaming variants return `Err::Incomplete(Needed)`. This duplication is nom's
   most-criticized design choice.
 - Binary numbers: `be_u16`, `le_u32`, `be_f64`, `u32(Endianness)`, etc.
@@ -101,7 +101,7 @@ Everything else is reusable as-is. That is what makes the recommended design
 - Binary combinators in `winnow::binary`: `be_u16`, `le_u32`, `length_take`,
   `length_and_then`, …
 
-**Verdict.** Adopt winnow's *shape* — single `Stream` trait + `Partial` wrapper +
+**Verdict.** Adopt winnow's _shape_ — single `Stream` trait + `Partial` wrapper +
 `StreamIsPartial` — because it delivers generic input **and** streaming through
 one combinator set. Reject nom's duplicated-module streaming. Keep the crate's
 differentiators: **named zero-cost combinator types** (better error messages and
@@ -116,7 +116,7 @@ The hard part of "generic input with borrowed output" is that `literal` must
 yield `&'i str` / `&'i [u8]` — output borrowing the input. Naively this needs
 GATs. winnow's escape: **implement `Stream` on the borrowed type itself**
 (`&'i [u8]`), so the lifetime is carried by the `Self` type and `Slice` is a
-*plain* associated type. We do the same — no GATs, stable Rust.
+_plain_ associated type. We do the same — no GATs, stable Rust.
 
 ```rust
 /// A position-trackable input source. Implemented on borrowed slices, so the
@@ -169,7 +169,7 @@ pub trait Parser<S: Stream> {
 ```
 
 The trait gains a type parameter `S` in place of the lifetime `'i`; the
-combinator *methods* (`map`, `then`, `or`, …) are unchanged because they never
+combinator _methods_ (`map`, `then`, `or`, …) are unchanged because they never
 name `&str`. Leaf parsers move from `impl Parser<'i> for X` to a **blanket impl
 over `S`**:
 
@@ -221,12 +221,12 @@ Caller loop (winnow-style sliding window):
 3. On `Incomplete(Needed)` → append more bytes to `buf`, retry from the checkpoint.
 4. On `Failure` → real error.
 
-**Honest limitation (documented):** `Partial<&[u8]>` still *borrows* the whole
+**Honest limitation (documented):** `Partial<&[u8]>` still _borrows_ the whole
 current buffer — it does not by itself free consumed bytes. True bounded-memory
 streaming over an unbounded source requires the caller to maintain a sliding
 window / ring buffer and drop already-consumed prefixes, or a future owned-input
 adapter. winnow and nom have the exact same constraint; this is inherent to
-zero-copy borrowed parsing, not a shortcoming we introduce. The design *enables*
+zero-copy borrowed parsing, not a shortcoming we introduce. The design _enables_
 incremental processing (you never need all bytes resident at once); it does not
 make a borrowed slice forget its start. See risk R3.
 
@@ -256,7 +256,7 @@ cursor; keep that guarantee and avoid a second axis of generics.
 | `literal(lit)` | via `Compare`; `&str` lit on str streams, `&[u8]` lit on byte streams; yields `S::Slice` |
 | `bytes(n)` → rename `take(n)` | takes `n` base units, yields `S::Slice`; **no char-boundary rejection** on `&[u8]` (the failure path at `typed.rs:1349` disappears) |
 | `eof()` | unchanged (already generic) |
-| `eventually` | skips one *token* at a time |
+| `eventually` | skips one _token_ at a time |
 | every threading combinator | only the `'i`→`S` signature change; bodies unchanged |
 
 ### New (binary + streaming surface)
@@ -295,6 +295,122 @@ trait lands.
 - **Phase 5 — `length_take`/`length_value`, `&[T]` token-slice impl, `Generate`
   bytes split, docs / parity matrix / CHANGELOG.**
 
+## Migrating existing `&str` parsers
+
+Although this is a breaking change, most text grammars need only mechanical
+edits. The reason: `&str` implements `Stream` with `Token = char` and
+`Slice = &str`, so every combinator keeps the _same output type_ it had before
+(`any()` → `char`, `digits()` → `&str`, `literal("x")` → `&str`). The break is in
+the _type signatures_ of parsers you name explicitly, not in their behavior.
+
+### TL;DR by how you use the crate
+
+- **You only compose provided combinators and call `.parse("…")`** → near-zero
+  changes. The `&str` argument pins `S = &str`, inference fills the rest. Apply the
+  `bytes` → `take` rename (below) and you are done.
+- **You wrote functions that _return_ parsers with a named lifetime** → swap the
+  lifetime bound for a stream bound (or pin to `&str`). See §"Functions that
+  return parsers".
+- **You hand-implemented the `Parser` trait** → this is the real work; the impl
+  header changes. See §"Custom `Parser` impls".
+- **You implemented `Generate`** → signature moves from `String` to `Vec<u8>`.
+
+### Mechanical renames / signature swaps
+
+| Before (`&str`-only) | After (generic) | Note |
+|---|---|---|
+| `bytes(n)` | `take(n)` | Same behavior on `&str` (counts bytes, still errors off a char boundary); the name now also fits `&[u8]`, where any `n` is valid. |
+| `fn p<'i>() -> impl Parser<'i>` | `fn p<S: Stream>() -> impl Parser<S>` | Or pin: `fn p<'i>() -> impl Parser<&'i str>` to migrate incrementally. |
+| `impl<'i> Parser<'i> for X` | `impl<S: Stream> Parser<S> for X` | Or pin: `impl<'i> Parser<&'i str> for X`. See below. |
+| `ParseFailure<'a>` in your signatures | `ParseFailure<&'a str>` | The struct gained a stream parameter; for text it is `&str`, so fields (`reason`, `expected`, `rest`, `cursor`) are unchanged. |
+| matching the parse `Result` | unchanged for `.parse` | The top-level `.parse(src)` flattens `Incomplete` into a normal `ParseFailure`, so complete-input error handling is untouched. `Incomplete` only surfaces under `Partial<S>`. |
+
+Closures keep their annotations as-is: `.map(|ds: &str| …)` and
+`.satisfy(|c: char| …)` still type-check on `&str` streams because the token and
+slice types are unchanged.
+
+### Functions that return parsers
+
+The common pattern of factoring a sub-grammar into a function gains a stream
+parameter:
+
+```rust
+// Before
+fn quoted<'i>() -> impl Parser<'i, Output = &'i str> { … }
+
+// After — generic (works on &str and &[u8])
+fn quoted<S: Stream>() -> impl Parser<S, Output = S::Slice> { … }
+
+// After — pinned to text, smallest diff if you don't need bytes
+fn quoted<'i>() -> impl Parser<&'i str, Output = &'i str> { … }
+```
+
+Pinning to `&str` is the recommended incremental path: a parser written
+`impl Parser<&'i str>` compiles unchanged in behavior and can be generalized later
+without touching its call sites.
+
+### Custom `Parser` impls
+
+A hand-written leaf is where you do actual work, because it likely calls
+`&str`-specific methods (`chars()`, `starts_with`, slicing). Two paths:
+
+```rust
+// Path A — pin to &str (no behavior change, smallest edit):
+impl<'i> Parser<&'i str> for MyLeaf {
+    type Output = &'i str;
+    fn parse_next(&self, input: &mut Input<&'i str>) -> PResult<&'i str, Self::Output> { … }
+}
+
+// Path B — go generic: replace &str method calls with Stream methods
+// (`first`, `split_at`, `raw`, `checkpoint`) and route end-of-input through
+// `incomplete_or_err` so the leaf also works under `Partial<S>`.
+impl<S: Stream> Parser<S> for MyLeaf {
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Self::Output> { … }
+}
+```
+
+Most users have **no** custom leaves — they compose the built-ins — so this
+section usually does not apply.
+
+### `Generate` impls
+
+`generate_into` takes `&mut Vec<u8>` instead of `&mut String`. Text generators
+push UTF-8 bytes (`out.extend_from_slice(s.as_bytes())`); call the `generate_str`
+convenience wrapper when you want a `String` back.
+
+### Worked example
+
+```rust
+// ── Before (today's &str-only API) ──────────────────────────────────────
+use nimble_parsec_rs::typed::{digits, literal, Parser};
+
+fn paren_number<'i>() -> impl Parser<'i, Output = u32> {
+    literal("(")
+        .ignore_then(digits())
+        .then_ignore(literal(")"))
+        .map(|d: &str| d.parse().unwrap())
+}
+assert_eq!(paren_number().parse("(42)").unwrap(), 42);
+
+// ── After (generic; this grammar is text-only, so pin to &str) ──────────
+use nimble_parsec_rs::typed::{digits, literal, Parser};
+
+fn paren_number<'i>() -> impl Parser<&'i str, Output = u32> {
+    literal("(")                       // unchanged
+        .ignore_then(digits())         // unchanged → &str
+        .then_ignore(literal(")"))     // unchanged
+        .map(|d: &str| d.parse().unwrap())
+}
+assert_eq!(paren_number().parse("(42)").unwrap(), 42);  // call site unchanged
+```
+
+The only edit is the return type's lifetime bound `Parser<'i, …>` →
+`Parser<&'i str, …>`. The body and the call site are identical. Migration is
+therefore a find-and-replace over parser-returning function signatures plus the
+`bytes` → `take` rename; deeper changes are needed only if you maintain custom
+`Parser`/`Generate` impls or want a grammar to run on bytes.
+
 ## Alternatives considered, rated
 
 **Input model.**
@@ -305,15 +421,15 @@ trait lands.
   identity. Cost: a real refactor of C1–C12 and a one-time test/example migration.
   Chosen.
 - **Option B — parallel `&[u8]` byte core alongside `&str`. ★★☆☆☆**
-  Fastest to *start*, zero churn to the str API. But it bakes in nom's
+  Fastest to _start_, zero churn to the str API. But it bakes in nom's
   double-write tax forever (two combinator sets, two error types, drift), and
-  streaming would have to be written a *third* time. Rejected — contradicts the
+  streaming would have to be written a _third_ time. Rejected — contradicts the
   "single generic" goal.
 - **Option C — binary-first core (`&[u8]` canonical, `&str` a layer). ★★★☆☆**
   Truest to Elixir and conceptually clean (text = `utf8_char` over bytes). But it
-  makes the *common* case (text grammars) pay a wrapping/decoding tax and lose
+  makes the _common_ case (text grammars) pay a wrapping/decoding tax and lose
   direct `&str` outputs, and it's a bigger break than A for no extra capability
-  once A already supports `&[u8]`. Rejected as the *primary* model, but its
+  once A already supports `&[u8]`. Rejected as the _primary_ model, but its
   `utf8_char`-over-bytes idea is adopted inside A.
 
 **Streaming sub-design.**
@@ -338,7 +454,7 @@ trait lands.
 - **R1 — `literal` ergonomics across streams.** `literal("ab")` should work on
   `&str` and `literal(b"ab")` / `literal(&[0,1])` on `&[u8]`. Solved via
   `Compare<T>` with impls for `&str`-vs-str and `&[u8]`-vs-bytes; needs care so a
-  `&str` literal on a byte stream is a *type error*, not a silent UTF-8
+  `&str` literal on a byte stream is a _type error_, not a silent UTF-8
   reinterpretation.
 - **R2 — `Token=char` vs `u8` changes output types.** `any()`/`satisfy` now yield
   `S::Token`, so grammars that used `char` must annotate or run on a `&str`
