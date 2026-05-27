@@ -1,54 +1,90 @@
-//! Typed parser combinators — RFC 0001, phase 2: the typed `Parser<Output>` core.
+//! Typed, generic parser combinators — RFC 0001 + RFC 0002.
 //!
-//! A [`Parser`] is generic over its `Output`, so combinators compose and
-//! type-check at compile time with no runtime `Value` tagging: [`literal`]
-//! yields `&str`, [`Parser::then`] yields a tuple, [`Parser::repeated`] yields a
-//! `Vec`, and a `.map` threads any output type through. This is the foundation
-//! of the planned typed surface (see `docs/rfcs/0001-typed-parser.md`); it lives
-//! beside the `Value`-based API during the migration and reuses the same
-//! structured [`ParseFailure`] and recursion-depth cap.
+//! A [`Parser`] is generic over both its `Output` and its input **[`Stream`]**
+//! (`&str`, `&[u8]`, `Partial<_>` for streaming, or a custom token sequence),
+//! so grammars compose and type-check at compile time with no runtime `Value`
+//! tagging.
+//!
+//! ## Text grammar (unchanged surface)
 //!
 //! ```
 //! use nimble_parsec_rs::typed::{digits, literal, Parser};
 //!
-//! // "(" digits ")", keeping only the digits, parsed as a number.
 //! let inner = literal("(")
 //!     .ignore_then(digits())
 //!     .then_ignore(literal(")"))
 //!     .map(|ds: &str| ds.parse::<u32>().unwrap());
 //! assert_eq!(inner.parse("(42)").unwrap(), 42);
 //! ```
+//!
+//! ## Binary grammar
+//!
+//! ```
+//! use nimble_parsec_rs::typed::{be_u32, take, literal, Parser};
+//!
+//! // Parse a 4-byte big-endian magic number followed by a 2-byte payload.
+//! let header = be_u32().then(take(2));
+//! let (magic, payload) = header.parse(b"\xDE\xAD\xBE\xEF\x01\x02".as_ref()).unwrap();
+//! assert_eq!(magic, 0xDEAD_BEEF);
+//! assert_eq!(payload, &[0x01, 0x02]);
+//! ```
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
+use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::{Cursor, ParseFailure, DEFAULT_MAX_RECURSION_DEPTH};
+use crate::{Cursor, Needed, ParseError, ParseFailure, Stream, DEFAULT_MAX_RECURSION_DEPTH};
 
-/// The result of a typed parse step.
-pub type PResult<'i, O> = Result<O, ParseFailure<'i>>;
+/// The result of a single parse step. `Ok(value)` on success; `Err` carries
+/// either a [`ParseFailure`] (hard error) or [`crate::Needed`] (incomplete
+/// input on a [`crate::Partial`] stream).
+pub type PResult<S, O> = Result<O, ParseError<S>>;
 
-/// Parser input: the unconsumed text and the current position. It is `Copy`, so
-/// a combinator snapshots it before a fallible attempt and restores it on
-/// failure — the backtracking primitive the alternation/repetition combinators
-/// rely on.
-#[derive(Clone, Copy, Debug)]
-pub struct Input<'i> {
-    rest: &'i str,
+// ── Input ─────────────────────────────────────────────────────────────────────
+
+/// Parser input: the unconsumed stream and the current position. `Copy`
+/// (because `S: Stream: Copy` and `Cursor: Copy`), so a combinator can
+/// snapshot it before a fallible attempt and restore it on failure — the
+/// zero-cost backtracking primitive used by alternation and repetition.
+pub struct Input<S: Stream> {
+    stream: S,
     cursor: Cursor,
 }
 
-impl<'i> Input<'i> {
-    /// Wraps `text`, positioned at its start.
-    pub fn new(text: &'i str) -> Self {
+// Manual Copy/Clone so we don't require S: Clone beyond what Stream provides.
+impl<S: Stream> Copy for Input<S> {}
+impl<S: Stream> Clone for Input<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: Stream> core::fmt::Debug for Input<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Input")
+            .field("preview", &self.stream.preview(32))
+            .field("cursor", &self.cursor)
+            .finish()
+    }
+}
+
+impl<S: Stream> Input<S> {
+    /// Wraps `src`, positioned at its start.
+    pub fn new(src: S) -> Self {
         Self {
-            rest: text,
+            stream: src,
             cursor: Cursor::default(),
         }
     }
 
-    /// The still-unconsumed input.
-    pub fn rest(&self) -> &'i str {
-        self.rest
+    /// The still-unconsumed stream.
+    pub fn stream(&self) -> S {
+        self.stream
+    }
+
+    /// The still-unconsumed stream (alias for [`stream`](Input::stream)).
+    pub fn rest(&self) -> S {
+        self.stream
     }
 
     /// The current position.
@@ -56,84 +92,123 @@ impl<'i> Input<'i> {
         self.cursor
     }
 
-    /// Advances past `consumed`, which must be the current prefix of [`rest`](Self::rest).
-    fn bump(&mut self, consumed: &str) {
-        self.cursor = crate::advance(self.cursor, consumed);
-        self.rest = &self.rest[consumed.len()..];
+    /// Advances `n` base units, scanning for newlines so line tracking stays
+    /// accurate. Panics if `n > self.stream.len()`.
+    fn bump(&mut self, n: usize) {
+        self.cursor = self.stream.advance_cursor(self.cursor, n);
+        let (_, rest) = self.stream.split_at(n);
+        self.stream = rest;
     }
 }
 
-/// A parser producing a typed `Output` from [`Input`].
+// ── incomplete_or_err ─────────────────────────────────────────────────────────
+
+/// At end-of-buffer: returns `Incomplete` on partial streams, a hard
+/// expectation failure on complete streams. This is the single point that lets
+/// one combinator body serve both complete and streaming parsing (RFC 0002 §
+/// "The no-GAT trick").
+#[inline]
+fn incomplete_or_err<S: Stream, O>(
+    expectation: &str,
+    rest: S::Slice,
+    cursor: Cursor,
+) -> PResult<S, O> {
+    if S::PARTIAL {
+        Err(ParseError::Incomplete(Needed::Unknown))
+    } else {
+        Err(ParseError::Failure(ParseFailure::expecting(
+            expectation,
+            rest,
+            cursor,
+        )))
+    }
+}
+
+// ── Parser trait ──────────────────────────────────────────────────────────────
+
+/// A parser that produces a typed `Output` from an input [`Stream`] `S`.
 ///
-/// Implement [`parse_next`](Parser::parse_next) (advance the input, or return a
-/// [`ParseFailure`] leaving it for the caller to restore); the composition
-/// methods are provided. The leaf constructors ([`literal`], [`any`],
-/// [`satisfy`], …) and combinators return named zero-cost types, so grammars are
-/// fully monomorphized.
-pub trait Parser<'i> {
+/// Implement [`parse_next`](Parser::parse_next); all composition methods are
+/// provided. Leaf constructors ([`literal`], [`any`], [`satisfy`], …) and
+/// combinators return named zero-cost structs so grammars are fully
+/// monomorphized — no heap allocation, no dynamic dispatch in the hot path.
+pub trait Parser<S: Stream> {
     /// The value this parser produces on success.
     type Output;
 
-    /// Parses from the front of `input`, advancing it past what was consumed. On
-    /// failure the input is left as the implementation chose to leave it;
-    /// backtracking combinators snapshot and restore it themselves.
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Self::Output>;
+    /// Parses from the front of `input`, advancing it past what was consumed.
+    /// On failure the input is left as the implementation chose; backtracking
+    /// combinators snapshot and restore it themselves.
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Self::Output>;
 
-    /// Runs the parser over the whole `text`, requiring all input to be consumed,
-    /// with the default recursion cap ([`DEFAULT_MAX_RECURSION_DEPTH`]).
-    fn parse(&self, text: &'i str) -> PResult<'i, Self::Output>
+    /// Runs the parser over the whole `src`, requiring all input to be
+    /// consumed, with the default recursion cap.
+    ///
+    /// `Incomplete` (from a `Partial` stream) is converted to a
+    /// [`ParseFailure`] so the simple error path is always available.
+    fn parse(&self, src: S) -> Result<Self::Output, ParseFailure<S>>
     where
         Self: Sized,
     {
-        self.parse_with_max_depth(text, DEFAULT_MAX_RECURSION_DEPTH)
+        self.parse_with_max_depth(src, DEFAULT_MAX_RECURSION_DEPTH)
     }
 
     /// Like [`parse`](Parser::parse), but caps recursion depth at `max_depth`.
-    fn parse_with_max_depth(&self, text: &'i str, max_depth: usize) -> PResult<'i, Self::Output>
+    fn parse_with_max_depth(
+        &self,
+        src: S,
+        max_depth: usize,
+    ) -> Result<Self::Output, ParseFailure<S>>
     where
         Self: Sized,
     {
-        let (output, rest) = self.parse_partial_with_max_depth(text, max_depth)?;
-        if rest.is_empty() {
-            Ok(output)
-        } else {
-            // Re-derive the position of the leftover for the error.
-            let mut input = Input::new(text);
-            input.bump(&text[..text.len() - rest.len()]);
-            Err(ParseFailure::expecting(
-                "expected end of input",
-                rest,
-                input.cursor,
-            ))
+        match self.parse_partial_with_max_depth(src, max_depth) {
+            Ok((output, remaining)) if remaining.is_empty() => Ok(output),
+            Ok((_, remaining)) => {
+                // Compute the cursor at the leftover position by fast-forwarding
+                // through the consumed portion.
+                let consumed = src.len() - remaining.len();
+                let mut tmp = Input::new(src);
+                tmp.bump(consumed);
+                Err(ParseFailure::expecting(
+                    "expected end of input",
+                    remaining.as_slice(),
+                    tmp.cursor,
+                ))
+            }
+            Err(ParseError::Failure(f)) => Err(f),
+            Err(ParseError::Incomplete(_)) => Err(ParseFailure::rejected(
+                "incomplete input: more data is needed to complete this parse",
+                src.as_slice(),
+                Cursor::default(),
+            )),
         }
     }
 
-    /// Runs the parser, returning the output and the unconsumed remainder rather
-    /// than requiring all input to be consumed.
-    fn parse_partial(&self, text: &'i str) -> Result<(Self::Output, &'i str), ParseFailure<'i>>
+    /// Runs the parser, returning the output and the unconsumed remainder.
+    /// Does **not** require all input to be consumed.
+    fn parse_partial(&self, src: S) -> Result<(Self::Output, S), ParseError<S>>
     where
         Self: Sized,
     {
-        self.parse_partial_with_max_depth(text, DEFAULT_MAX_RECURSION_DEPTH)
+        self.parse_partial_with_max_depth(src, DEFAULT_MAX_RECURSION_DEPTH)
     }
 
-    /// Like [`parse_partial`](Parser::parse_partial), but caps recursion depth at
-    /// `max_depth`.
+    /// Like [`parse_partial`](Parser::parse_partial), but caps recursion
+    /// depth at `max_depth`.
     fn parse_partial_with_max_depth(
         &self,
-        text: &'i str,
+        src: S,
         max_depth: usize,
-    ) -> Result<(Self::Output, &'i str), ParseFailure<'i>>
+    ) -> Result<(Self::Output, S), ParseError<S>>
     where
         Self: Sized,
     {
-        // Set the budget for this parse and restore the previous one on return,
-        // so a `parse` invoked from within a transform closure is re-entrant.
         let prev = crate::RECURSION_BUDGET.with(|b| b.replace(max_depth));
-        let mut input = Input::new(text);
+        let mut input = Input::new(src);
         let result = self.parse_next(&mut input);
         crate::RECURSION_BUDGET.with(|b| b.set(prev));
-        Ok((result?, input.rest))
+        Ok((result?, input.stream))
     }
 
     /// Transforms the output with `f`.
@@ -157,7 +232,7 @@ pub trait Parser<'i> {
     fn then<P>(self, next: P) -> Then<Self, P>
     where
         Self: Sized,
-        P: Parser<'i>,
+        P: Parser<S>,
     {
         Then {
             first: self,
@@ -169,7 +244,7 @@ pub trait Parser<'i> {
     fn ignore_then<P>(self, next: P) -> IgnoreThen<Self, P>
     where
         Self: Sized,
-        P: Parser<'i>,
+        P: Parser<S>,
     {
         IgnoreThen {
             first: self,
@@ -181,7 +256,7 @@ pub trait Parser<'i> {
     fn then_ignore<P>(self, next: P) -> ThenIgnore<Self, P>
     where
         Self: Sized,
-        P: Parser<'i>,
+        P: Parser<S>,
     {
         ThenIgnore {
             first: self,
@@ -189,17 +264,17 @@ pub trait Parser<'i> {
         }
     }
 
-    /// Tries `self`; if it fails (consuming nothing), tries `alt`. Both branches
-    /// must produce the same output type.
+    /// Tries `self`; on failure (consuming nothing) tries `alt`. Both must
+    /// produce the same output type.
     fn or<P>(self, alt: P) -> Or<Self, P>
     where
         Self: Sized,
-        P: Parser<'i, Output = Self::Output>,
+        P: Parser<S, Output = Self::Output>,
     {
         Or { a: self, b: alt }
     }
 
-    /// Makes `self` optional, yielding `None` (and consuming nothing) on failure.
+    /// Makes `self` optional; yields `None` (consuming nothing) on failure.
     fn optional(self) -> Opt<Self>
     where
         Self: Sized,
@@ -219,7 +294,7 @@ pub trait Parser<'i> {
         }
     }
 
-    /// Repeats `self` at least `min` times, collecting the outputs.
+    /// Repeats `self` at least `min` times.
     fn repeated_at_least(self, min: usize) -> Repeated<Self>
     where
         Self: Sized,
@@ -231,8 +306,7 @@ pub trait Parser<'i> {
         }
     }
 
-    /// Repeats `self` between `min` and `max` times (inclusive), collecting the
-    /// outputs.
+    /// Repeats `self` between `min` and `max` times inclusive.
     fn repeated_in(self, min: usize, max: usize) -> Repeated<Self>
     where
         Self: Sized,
@@ -244,7 +318,7 @@ pub trait Parser<'i> {
         }
     }
 
-    /// Replaces the output with a clone of `value` (NimbleParsec's `replace`).
+    /// Replaces the output with a clone of `value`.
     fn to<V: Clone>(self, value: V) -> To<Self, V>
     where
         Self: Sized,
@@ -252,9 +326,8 @@ pub trait Parser<'i> {
         To { inner: self, value }
     }
 
-    /// Repeats `self` zero or more times, folding the outputs into an accumulator
-    /// seeded by `init` (NimbleParsec's `reduce`, done without the intermediate
-    /// `Vec` that `self.repeated().map(…)` would allocate).
+    /// Repeats `self` zero or more times, folding outputs into an accumulator
+    /// seeded by `init` (NimbleParsec's `reduce`).
     fn fold<A, I, F>(self, init: I, f: F) -> Fold<Self, I, F>
     where
         Self: Sized,
@@ -268,8 +341,7 @@ pub trait Parser<'i> {
         }
     }
 
-    /// Transforms the output with a fallible `f`; returning `Err(message)` fails
-    /// the parse (NimbleParsec's validating `post_traverse`).
+    /// Transforms with a fallible `f`; returning `Err(message)` fails the parse.
     fn try_map<U, F>(self, f: F) -> TryMap<Self, F>
     where
         Self: Sized,
@@ -278,23 +350,18 @@ pub trait Parser<'i> {
         TryMap { inner: self, f }
     }
 
-    /// Uses this parser's output to **choose the next parser** (monadic bind),
-    /// then runs that parser on the remaining input. This is what enables
-    /// context-sensitive grammars the static combinators can't express — e.g. a
-    /// length prefix that governs how much to read next, or indentation-sensitive
-    /// layouts. Like [`recursive`], a `flat_map` grammar is not generatable (the
-    /// next parser depends on a runtime value), so it does not implement
-    /// [`Generate`].
+    /// Monadic bind: uses this output to choose the next parser, enabling
+    /// context-sensitive grammars (e.g. a length prefix). Not generatable.
     fn flat_map<U, F>(self, f: F) -> FlatMap<Self, F>
     where
         Self: Sized,
-        U: Parser<'i>,
+        U: Parser<S>,
         F: Fn(Self::Output) -> U,
     {
         FlatMap { inner: self, f }
     }
 
-    /// Overrides the failure message (and the structured expectation) with `label`.
+    /// Overrides the failure message and structured expectation with `label`.
     fn labelled(self, label: &'static str) -> Labelled<Self>
     where
         Self: Sized,
@@ -302,8 +369,7 @@ pub trait Parser<'i> {
         Labelled { inner: self, label }
     }
 
-    /// Pairs the output with the byte offset reached after the match
-    /// (NimbleParsec's `byte_offset`).
+    /// Pairs the output with the byte offset reached after the match.
     fn with_byte_offset(self) -> WithByteOffset<Self>
     where
         Self: Sized,
@@ -311,8 +377,8 @@ pub trait Parser<'i> {
         WithByteOffset { inner: self }
     }
 
-    /// Pairs the output with the position reached after the match — `(1-based
-    /// line, byte offset of the start of that line)` (NimbleParsec's `line`).
+    /// Pairs the output with the position reached after the match
+    /// `(1-based line, byte offset of the start of that line)`.
     fn with_line(self) -> WithLine<Self>
     where
         Self: Sized,
@@ -320,9 +386,8 @@ pub trait Parser<'i> {
         WithLine { inner: self }
     }
 
-    /// Traces this parser to stderr (the position on entry and the outcome on
-    /// exit), passing the output through unchanged (NimbleParsec's `debug`).
-    /// `label` identifies the parser in the trace.
+    /// Traces this parser to stderr (position on entry, outcome on exit),
+    /// passing the output through unchanged.
     fn debug(self, label: &'static str) -> Debug<Self>
     where
         Self: Sized,
@@ -330,15 +395,7 @@ pub trait Parser<'i> {
         Debug { inner: self, label }
     }
 
-    /// Transforms the output with `f`, which also receives the [`Cursor`]
-    /// **after** the match and may fail the parse by returning `Err(message)`
-    /// (NimbleParsec's `post_traverse`).
-    ///
-    /// User *context* (a symbol table, counters, …) is threaded by capturing
-    /// interior-mutable state (`Cell` / `RefCell`) in `f`: the same captured
-    /// state is shared across every invocation and across sibling combinators,
-    /// enabling context-dependent parsing. (As in winnow, captured state is not
-    /// rolled back when an enclosing `or` / `optional` backtracks.)
+    /// Transforms with `f(output, cursor_after)`, which may fail the parse.
     fn post_traverse<U, F>(self, f: F) -> PostTraverse<Self, F>
     where
         Self: Sized,
@@ -347,9 +404,8 @@ pub trait Parser<'i> {
         PostTraverse { inner: self, f }
     }
 
-    /// Like [`post_traverse`](Parser::post_traverse), but `f` receives the
-    /// [`Cursor`] from **before** the match — handy for tagging a result with
-    /// its start position (NimbleParsec's `pre_traverse`).
+    /// Like [`post_traverse`](Parser::post_traverse), but receives the cursor
+    /// **before** the match.
     fn pre_traverse<U, F>(self, f: F) -> PreTraverse<Self, F>
     where
         Self: Sized,
@@ -359,7 +415,7 @@ pub trait Parser<'i> {
     }
 }
 
-// ── Combinators ──────────────────────────────────────────────────────────────
+// ── Threading combinators ─────────────────────────────────────────────────────
 
 /// [`Parser::map`].
 pub struct Map<P, F> {
@@ -367,13 +423,13 @@ pub struct Map<P, F> {
     f: F,
 }
 
-impl<'i, P, F, U> Parser<'i> for Map<P, F>
+impl<S: Stream, P, F, U> Parser<S> for Map<P, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     F: Fn(P::Output) -> U,
 {
     type Output = U;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, U> {
         let out = self.inner.parse_next(input)?;
         Ok((self.f)(out))
     }
@@ -384,9 +440,9 @@ pub struct Ignored<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Ignored<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Ignored<P> {
     type Output = ();
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, ()> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, ()> {
         self.inner.parse_next(input)?;
         Ok(())
     }
@@ -398,9 +454,9 @@ pub struct Then<A, B> {
     second: B,
 }
 
-impl<'i, A: Parser<'i>, B: Parser<'i>> Parser<'i> for Then<A, B> {
+impl<S: Stream, A: Parser<S>, B: Parser<S>> Parser<S> for Then<A, B> {
     type Output = (A::Output, B::Output);
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, (A::Output, B::Output)> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, (A::Output, B::Output)> {
         let a = self.first.parse_next(input)?;
         let b = self.second.parse_next(input)?;
         Ok((a, b))
@@ -413,9 +469,9 @@ pub struct IgnoreThen<A, B> {
     second: B,
 }
 
-impl<'i, A: Parser<'i>, B: Parser<'i>> Parser<'i> for IgnoreThen<A, B> {
+impl<S: Stream, A: Parser<S>, B: Parser<S>> Parser<S> for IgnoreThen<A, B> {
     type Output = B::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, B::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, B::Output> {
         self.first.parse_next(input)?;
         self.second.parse_next(input)
     }
@@ -427,9 +483,9 @@ pub struct ThenIgnore<A, B> {
     second: B,
 }
 
-impl<'i, A: Parser<'i>, B: Parser<'i>> Parser<'i> for ThenIgnore<A, B> {
+impl<S: Stream, A: Parser<S>, B: Parser<S>> Parser<S> for ThenIgnore<A, B> {
     type Output = A::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, A::Output> {
         let a = self.first.parse_next(input)?;
         self.second.parse_next(input)?;
         Ok(a)
@@ -442,31 +498,32 @@ pub struct Or<A, B> {
     b: B,
 }
 
-impl<'i, A, B> Parser<'i> for Or<A, B>
+impl<S: Stream, A, B> Parser<S> for Or<A, B>
 where
-    A: Parser<'i>,
-    B: Parser<'i, Output = A::Output>,
+    A: Parser<S>,
+    B: Parser<S, Output = A::Output>,
 {
     type Output = A::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, A::Output> {
         let start = *input;
         match self.a.parse_next(input) {
             Ok(out) => Ok(out),
-            Err(first) => {
+            Err(ParseError::Incomplete(n)) => Err(ParseError::Incomplete(n)),
+            Err(ParseError::Failure(err_a)) => {
                 *input = start;
                 match self.b.parse_next(input) {
                     Ok(out) => Ok(out),
-                    Err(second) => {
+                    Err(ParseError::Incomplete(n)) => Err(ParseError::Incomplete(n)),
+                    Err(ParseError::Failure(err_b)) => {
                         *input = start;
-                        // Union the branches' expectations, join their messages.
-                        let mut expected = first.expected;
-                        expected.extend(second.expected);
-                        Err(ParseFailure {
-                            reason: format!("{} or {}", first.reason, second.reason),
+                        let mut expected = err_a.expected;
+                        expected.extend(err_b.expected);
+                        Err(ParseError::Failure(ParseFailure {
+                            reason: format!("{} or {}", err_a.reason, err_b.reason),
                             expected,
-                            rest: start.rest,
+                            rest: start.stream.as_slice(),
                             cursor: start.cursor,
-                        })
+                        }))
                     }
                 }
             }
@@ -479,13 +536,16 @@ pub struct Opt<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Opt<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Opt<P> {
     type Output = Option<P::Output>;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Option<P::Output>> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Option<P::Output>> {
         let start = *input;
         match self.inner.parse_next(input) {
             Ok(out) => Ok(Some(out)),
-            Err(_) => {
+            // Propagate incomplete: on a partial stream we can't know if the
+            // inner parser would have matched given more data.
+            Err(e @ ParseError::Incomplete(_)) => Err(e),
+            Err(ParseError::Failure(_)) => {
                 *input = start;
                 Ok(None)
             }
@@ -500,9 +560,9 @@ pub struct Repeated<P> {
     max: Option<usize>,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Repeated<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Repeated<P> {
     type Output = Vec<P::Output>;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<P::Output>> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Vec<P::Output>> {
         let mut out = Vec::new();
         loop {
             if self.max.is_some_and(|max| out.len() >= max) {
@@ -511,17 +571,24 @@ impl<'i, P: Parser<'i>> Parser<'i> for Repeated<P> {
             let start = *input;
             match self.inner.parse_next(input) {
                 Ok(item) => {
-                    if input.rest.len() == start.rest.len() {
-                        // A non-advancing match would loop forever: drop it and stop.
+                    if input.stream.len() == start.stream.len() {
+                        // Non-advancing match: drop and stop to avoid infinite loop.
                         *input = start;
                         break;
                     }
                     out.push(item);
                 }
-                Err(err) => {
+                Err(ParseError::Incomplete(n)) => {
+                    *input = start;
+                    if out.len() < self.min || S::PARTIAL {
+                        return Err(ParseError::Incomplete(n));
+                    }
+                    break;
+                }
+                Err(ParseError::Failure(err)) => {
                     *input = start;
                     if out.len() < self.min {
-                        return Err(err);
+                        return Err(ParseError::Failure(err));
                     }
                     break;
                 }
@@ -537,9 +604,9 @@ pub struct To<P, V> {
     value: V,
 }
 
-impl<'i, P: Parser<'i>, V: Clone> Parser<'i> for To<P, V> {
+impl<S: Stream, P: Parser<S>, V: Clone> Parser<S> for To<P, V> {
     type Output = V;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, V> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, V> {
         self.inner.parse_next(input)?;
         Ok(self.value.clone())
     }
@@ -552,26 +619,33 @@ pub struct Fold<P, I, F> {
     f: F,
 }
 
-impl<'i, P, I, F, A> Parser<'i> for Fold<P, I, F>
+impl<S: Stream, P, I, F, A> Parser<S> for Fold<P, I, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     I: Fn() -> A,
     F: Fn(A, P::Output) -> A,
 {
     type Output = A;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, A> {
         let mut acc = (self.init)();
         loop {
             let checkpoint = *input;
             match self.inner.parse_next(input) {
                 Ok(item) => {
-                    if input.rest.len() == checkpoint.rest.len() {
-                        *input = checkpoint; // non-advancing match: stop, don't loop
+                    if input.stream.len() == checkpoint.stream.len() {
+                        *input = checkpoint;
                         break;
                     }
                     acc = (self.f)(acc, item);
                 }
-                Err(_) => {
+                Err(ParseError::Incomplete(n)) => {
+                    *input = checkpoint;
+                    if S::PARTIAL {
+                        return Err(ParseError::Incomplete(n));
+                    }
+                    break;
+                }
+                Err(ParseError::Failure(_)) => {
                     *input = checkpoint;
                     break;
                 }
@@ -587,33 +661,39 @@ pub struct TryMap<P, F> {
     f: F,
 }
 
-impl<'i, P, F, U> Parser<'i> for TryMap<P, F>
+impl<S: Stream, P, F, U> Parser<S> for TryMap<P, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     F: Fn(P::Output) -> Result<U, String>,
 {
     type Output = U;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, U> {
         let out = self.inner.parse_next(input)?;
-        (self.f)(out).map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
+        (self.f)(out).map_err(|message| {
+            ParseError::Failure(ParseFailure::rejected(
+                message,
+                input.stream.as_slice(),
+                input.cursor,
+            ))
+        })
     }
 }
 
-/// [`Parser::flat_map`]. Intentionally has no [`Generate`] impl: the next parser
-/// depends on a runtime-parsed value, so a `flat_map` grammar cannot be sampled.
+/// [`Parser::flat_map`]. No [`Generate`] impl: the next parser depends on a
+/// runtime-parsed value, so a `flat_map` grammar cannot be sampled.
 pub struct FlatMap<P, F> {
     inner: P,
     f: F,
 }
 
-impl<'i, P, F, U> Parser<'i> for FlatMap<P, F>
+impl<S: Stream, P, F, U> Parser<S> for FlatMap<P, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     F: Fn(P::Output) -> U,
-    U: Parser<'i>,
+    U: Parser<S>,
 {
     type Output = U::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, U::Output> {
         let first = self.inner.parse_next(input)?;
         let next = (self.f)(first);
         next.parse_next(input)
@@ -625,10 +705,9 @@ pub struct Lookahead<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Lookahead<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Lookahead<P> {
     type Output = P::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
-        // Zero-width: run the inner parser, then restore the input position.
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
         let start = *input;
         let out = self.inner.parse_next(input);
         *input = start;
@@ -638,7 +717,7 @@ impl<'i, P: Parser<'i>> Parser<'i> for Lookahead<P> {
 
 /// Succeeds with `parser`'s output **without consuming input** (positive
 /// lookahead), or fails if `parser` fails.
-pub fn lookahead<'i, P: Parser<'i>>(parser: P) -> Lookahead<P> {
+pub fn lookahead<P>(parser: P) -> Lookahead<P> {
     Lookahead { inner: parser }
 }
 
@@ -647,27 +726,26 @@ pub struct Not<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Not<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Not<P> {
     type Output = ();
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, ()> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, ()> {
         let start = *input;
         let matched = self.inner.parse_next(input).is_ok();
         *input = start;
         if matched {
-            Err(ParseFailure::rejected(
+            Err(ParseError::Failure(ParseFailure::rejected(
                 "did not expect the lookahead parser to match",
-                start.rest,
+                start.stream.as_slice(),
                 start.cursor,
-            ))
+            )))
         } else {
             Ok(())
         }
     }
 }
 
-/// Succeeds (consuming nothing) only if `parser` fails — negative lookahead, the
-/// typed analogue of `lookahead_not`.
-pub fn not<'i, P: Parser<'i>>(parser: P) -> Not<P> {
+/// Succeeds (consuming nothing) only if `parser` fails — negative lookahead.
+pub fn not<P>(parser: P) -> Not<P> {
     Not { inner: parser }
 }
 
@@ -677,12 +755,15 @@ pub struct Labelled<P> {
     label: &'static str,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Labelled<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Labelled<P> {
     type Output = P::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
-        self.inner
-            .parse_next(input)
-            .map_err(|err| ParseFailure::expecting(self.label, err.rest, err.cursor))
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
+        self.inner.parse_next(input).map_err(|e| match e {
+            ParseError::Failure(err) => {
+                ParseError::Failure(ParseFailure::expecting(self.label, err.rest, err.cursor))
+            }
+            ParseError::Incomplete(n) => ParseError::Incomplete(n),
+        })
     }
 }
 
@@ -691,9 +772,9 @@ pub struct WithByteOffset<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for WithByteOffset<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for WithByteOffset<P> {
     type Output = (P::Output, usize);
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, (P::Output, usize)> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, (P::Output, usize)> {
         let out = self.inner.parse_next(input)?;
         Ok((out, input.cursor.byte_offset))
     }
@@ -704,9 +785,9 @@ pub struct WithLine<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for WithLine<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for WithLine<P> {
     type Output = (P::Output, (usize, usize));
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, (P::Output, (usize, usize))> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, (P::Output, (usize, usize))> {
         let out = self.inner.parse_next(input)?;
         Ok((out, (input.cursor.line, input.cursor.line_start_offset)))
     }
@@ -718,14 +799,14 @@ pub struct Debug<P> {
     label: &'static str,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Debug<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Debug<P> {
     type Output = P::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
         let before = input.cursor;
-        let preview: String = input.rest.chars().take(24).collect();
+        let preview = input.stream.preview(24);
         eprintln!(
-            "[nimble_parsec_rs] {}: enter at line {}, byte {} — rest {preview:?}",
-            self.label, before.line, before.byte_offset
+            "[nimble_parsec_rs] {}: enter at line {}, byte {} — rest {:?}",
+            self.label, before.line, before.byte_offset, preview
         );
         let result = self.inner.parse_next(input);
         match &result {
@@ -733,7 +814,12 @@ impl<'i, P: Parser<'i>> Parser<'i> for Debug<P> {
                 "[nimble_parsec_rs] {}: ok, now at byte {}",
                 self.label, input.cursor.byte_offset
             ),
-            Err(err) => eprintln!("[nimble_parsec_rs] {}: failed — {}", self.label, err.reason),
+            Err(ParseError::Failure(err)) => {
+                eprintln!("[nimble_parsec_rs] {}: failed — {}", self.label, err.reason)
+            }
+            Err(ParseError::Incomplete(_)) => {
+                eprintln!("[nimble_parsec_rs] {}: incomplete", self.label)
+            }
         }
         result
     }
@@ -745,16 +831,21 @@ pub struct PostTraverse<P, F> {
     f: F,
 }
 
-impl<'i, P, F, U> Parser<'i> for PostTraverse<P, F>
+impl<S: Stream, P, F, U> Parser<S> for PostTraverse<P, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     F: Fn(P::Output, Cursor) -> Result<U, String>,
 {
     type Output = U;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, U> {
         let out = self.inner.parse_next(input)?;
-        (self.f)(out, input.cursor)
-            .map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
+        (self.f)(out, input.cursor).map_err(|message| {
+            ParseError::Failure(ParseFailure::rejected(
+                message,
+                input.stream.as_slice(),
+                input.cursor,
+            ))
+        })
     }
 }
 
@@ -764,704 +855,787 @@ pub struct PreTraverse<P, F> {
     f: F,
 }
 
-impl<'i, P, F, U> Parser<'i> for PreTraverse<P, F>
+impl<S: Stream, P, F, U> Parser<S> for PreTraverse<P, F>
 where
-    P: Parser<'i>,
+    P: Parser<S>,
     F: Fn(P::Output, Cursor) -> Result<U, String>,
 {
     type Output = U;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, U> {
         let before = input.cursor;
         let out = self.inner.parse_next(input)?;
-        (self.f)(out, before)
-            .map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
-    }
-}
-
-// ── Leaves ───────────────────────────────────────────────────────────────────
-
-/// [`literal`].
-pub struct Literal {
-    lit: &'static str,
-}
-
-impl<'i> Parser<'i> for Literal {
-    type Output = &'i str;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, &'i str> {
-        let rest = input.rest;
-        if rest.starts_with(self.lit) {
-            let consumed = &rest[..self.lit.len()];
-            input.bump(consumed);
-            Ok(consumed)
-        } else {
-            Err(ParseFailure::expecting(
-                format!("expected {:?}", self.lit),
-                rest,
+        (self.f)(out, before).map_err(|message| {
+            ParseError::Failure(ParseFailure::rejected(
+                message,
+                input.stream.as_slice(),
                 input.cursor,
             ))
-        }
+        })
     }
 }
 
-/// Matches the exact string `lit`, yielding the consumed slice.
-pub fn literal(lit: &'static str) -> Literal {
-    Literal { lit }
+// ── Leaf parsers — generic ────────────────────────────────────────────────────
+
+/// [`literal`].
+pub struct Literal<S, Pat> {
+    lit: Pat,
+    _phantom: PhantomData<fn(S)>,
 }
 
-/// [`any`].
-pub struct AnyChar;
-
-impl<'i> Parser<'i> for AnyChar {
-    type Output = char;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, char> {
-        let rest = input.rest;
-        match rest.chars().next() {
-            Some(c) => {
-                input.bump(&rest[..c.len_utf8()]);
-                Ok(c)
+impl<S, Pat> Parser<S> for Literal<S, Pat>
+where
+    S: Stream + crate::Compare<Pat>,
+    Pat: Copy + core::fmt::Debug,
+{
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Slice> {
+        match input.stream.starts_with_pat(self.lit) {
+            Some(n) => {
+                let (consumed, _) = input.stream.split_at(n);
+                input.bump(n);
+                Ok(consumed)
             }
-            None => Err(ParseFailure::expecting(
-                "expected any character",
-                rest,
+            None => Err(ParseError::Failure(ParseFailure::expecting(
+                format!("expected {:?}", self.lit),
+                input.stream.as_slice(),
                 input.cursor,
-            )),
+            ))),
         }
     }
 }
 
-/// Matches any single character.
-pub fn any() -> AnyChar {
-    AnyChar
+/// Matches the exact pattern `lit` at the front of the stream, yielding the
+/// consumed slice. `lit` may be `&str` (on text streams) or `&[u8]` (on byte
+/// streams); a `&str` pattern on a `&[u8]` stream is a **compile-time error**,
+/// preventing silent misinterpretation.
+pub fn literal<S, Pat: Copy + core::fmt::Debug>(lit: Pat) -> Literal<S, Pat> {
+    Literal {
+        lit,
+        _phantom: PhantomData,
+    }
 }
 
-/// [`satisfy`].
-pub struct Satisfy<F> {
+/// [`any`] — yields `S::Token`: `char` for text streams, `u8` for byte streams.
+pub struct AnyToken<S: Stream> {
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream> Parser<S> for AnyToken<S> {
+    type Output = S::Token;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Token> {
+        match input.stream.first() {
+            Some((tok, w)) => {
+                input.bump(w);
+                Ok(tok)
+            }
+            None => incomplete_or_err("expected any token", input.stream.as_slice(), input.cursor),
+        }
+    }
+}
+
+/// Matches any single token (`char` for text, `u8` for bytes).
+pub fn any<S: Stream>() -> AnyToken<S> {
+    AnyToken {
+        _phantom: PhantomData,
+    }
+}
+
+/// [`satisfy`] — generic over `S::Token`.
+pub struct Satisfy<S: Stream, F> {
     pred: F,
     label: &'static str,
+    _phantom: PhantomData<fn(S)>,
 }
 
-impl<'i, F: Fn(char) -> bool> Parser<'i> for Satisfy<F> {
-    type Output = char;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, char> {
-        let rest = input.rest;
-        match rest.chars().next() {
-            Some(c) if (self.pred)(c) => {
-                input.bump(&rest[..c.len_utf8()]);
-                Ok(c)
+impl<S: Stream, F: Fn(S::Token) -> bool> Parser<S> for Satisfy<S, F> {
+    type Output = S::Token;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Token> {
+        match input.stream.first() {
+            Some((tok, w)) if (self.pred)(tok) => {
+                input.bump(w);
+                Ok(tok)
             }
-            _ => Err(ParseFailure::expecting(self.label, rest, input.cursor)),
+            Some(_) => Err(ParseError::Failure(ParseFailure::expecting(
+                self.label,
+                input.stream.as_slice(),
+                input.cursor,
+            ))),
+            None => incomplete_or_err(self.label, input.stream.as_slice(), input.cursor),
         }
     }
 }
 
-/// Matches a single character satisfying `pred`; `label` describes it on failure.
-pub fn satisfy<F: Fn(char) -> bool>(label: &'static str, pred: F) -> Satisfy<F> {
-    Satisfy { pred, label }
+/// Matches a single token satisfying `pred`; `label` describes it on failure.
+/// Works for both text streams (`pred: Fn(char) -> bool`) and byte streams
+/// (`pred: Fn(u8) -> bool`).
+pub fn satisfy<S: Stream, F: Fn(S::Token) -> bool>(label: &'static str, pred: F) -> Satisfy<S, F> {
+    Satisfy {
+        pred,
+        label,
+        _phantom: PhantomData,
+    }
 }
 
-/// [`take_while`] / [`take_while1`].
-pub struct TakeWhile<F> {
+/// [`take_while`] / [`take_while1`] — generic over `S::Token`.
+pub struct TakeWhile<S: Stream, F> {
     pred: F,
     min: usize,
+    _phantom: PhantomData<fn(S)>,
 }
 
-impl<'i, F: Fn(char) -> bool> Parser<'i> for TakeWhile<F> {
-    type Output = &'i str;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, &'i str> {
-        let rest = input.rest;
-        let mut end = 0;
-        let mut count = 0;
-        for (idx, c) in rest.char_indices() {
-            if (self.pred)(c) {
-                end = idx + c.len_utf8();
-                count += 1;
-            } else {
-                break;
+impl<S: Stream, F: Fn(S::Token) -> bool> Parser<S> for TakeWhile<S, F> {
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Slice> {
+        let mut end = 0usize;
+        let mut count = 0usize;
+        let mut scan = input.stream;
+        let mut exhausted = false;
+        loop {
+            match scan.first() {
+                Some((tok, w)) if (self.pred)(tok) => {
+                    end += w;
+                    count += 1;
+                    let (_, rest) = scan.split_at(w);
+                    scan = rest;
+                }
+                Some(_) => break,
+                None => {
+                    exhausted = true;
+                    break;
+                }
             }
         }
         if count < self.min {
-            return Err(ParseFailure::expecting(
-                "expected at least one matching character",
-                rest,
+            if exhausted {
+                return incomplete_or_err(
+                    "expected at least one matching token",
+                    input.stream.as_slice(),
+                    input.cursor,
+                );
+            }
+            return Err(ParseError::Failure(ParseFailure::expecting(
+                "expected at least one matching token",
+                input.stream.as_slice(),
                 input.cursor,
-            ));
+            )));
         }
-        let consumed = &rest[..end];
-        input.bump(consumed);
+        let (consumed, _) = input.stream.split_at(end);
+        input.bump(end);
         Ok(consumed)
     }
 }
 
-/// Consumes the maximal run of characters satisfying `pred` (possibly empty),
-/// yielding the consumed slice.
-pub fn take_while<F: Fn(char) -> bool>(pred: F) -> TakeWhile<F> {
-    TakeWhile { pred, min: 0 }
-}
-
-/// Like [`take_while`], but requires at least one character.
-pub fn take_while1<F: Fn(char) -> bool>(pred: F) -> TakeWhile<F> {
-    TakeWhile { pred, min: 1 }
-}
-
-/// A run of one or more ASCII digits, yielding the consumed slice.
-pub fn digits() -> TakeWhile<fn(char) -> bool> {
+/// Consumes the maximal run of tokens satisfying `pred` (possibly empty).
+pub fn take_while<S: Stream, F: Fn(S::Token) -> bool>(pred: F) -> TakeWhile<S, F> {
     TakeWhile {
-        pred: |c: char| c.is_ascii_digit(),
+        pred,
+        min: 0,
+        _phantom: PhantomData,
+    }
+}
+
+/// Like [`take_while`], but requires at least one token.
+pub fn take_while1<S: Stream, F: Fn(S::Token) -> bool>(pred: F) -> TakeWhile<S, F> {
+    TakeWhile {
+        pred,
         min: 1,
+        _phantom: PhantomData,
     }
 }
 
 /// [`eof`].
-pub struct Eof;
+pub struct Eof<S: Stream> {
+    _phantom: PhantomData<fn(S)>,
+}
 
-impl<'i> Parser<'i> for Eof {
+impl<S: Stream> Parser<S> for Eof<S> {
     type Output = ();
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, ()> {
-        if input.rest.is_empty() {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, ()> {
+        if input.stream.is_empty() {
             Ok(())
         } else {
-            Err(ParseFailure::expecting(
+            Err(ParseError::Failure(ParseFailure::expecting(
                 "expected end of input",
-                input.rest,
+                input.stream.as_slice(),
                 input.cursor,
-            ))
+            )))
         }
     }
 }
 
-/// Matches only at the end of input.
-pub fn eof() -> Eof {
-    Eof
+/// Matches only at the end of input (or end of the current buffer for
+/// `Partial` streams).
+pub fn eof<S: Stream>() -> Eof<S> {
+    Eof {
+        _phantom: PhantomData,
+    }
 }
 
+// ── Leaf parsers — text-specific ─────────────────────────────────────────────
+
 /// Matches a single character contained in `set`.
-pub fn one_of(set: &'static str) -> Satisfy<impl Fn(char) -> bool> {
-    satisfy("one of an expected set", move |c| set.contains(c))
+pub fn one_of<S: Stream<Token = char>>(set: &'static str) -> Satisfy<S, impl Fn(char) -> bool> {
+    satisfy("one of an expected set", move |c: char| set.contains(c))
 }
 
 /// Matches a single character **not** contained in `set`.
-pub fn none_of(set: &'static str) -> Satisfy<impl Fn(char) -> bool> {
-    satisfy("a character outside an excluded set", move |c| {
+pub fn none_of<S: Stream<Token = char>>(set: &'static str) -> Satisfy<S, impl Fn(char) -> bool> {
+    satisfy("a character outside an excluded set", move |c: char| {
         !set.contains(c)
     })
 }
 
-/// A set of alternatives for [`choice`] — implemented for arrays `[P; N]`
-/// (same parser type) and for tuples `(A, B, …)` up to arity 8 (different parser
-/// types, one shared `Output`).
-pub trait Alternatives<'i> {
-    /// The shared output type of every alternative.
-    type Output;
-    /// Tries each alternative in order, returning the first success or a failure
-    /// unioning the alternatives' expectations.
-    fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, Self::Output>;
-}
-
-fn choice_failure<'i>(
-    reasons: Vec<String>,
-    expected: Vec<String>,
-    at: Input<'i>,
-) -> ParseFailure<'i> {
-    ParseFailure {
-        reason: if reasons.is_empty() {
-            "choice has no options".to_string()
-        } else {
-            reasons.join(" or ")
-        },
-        expected,
-        rest: at.rest,
-        cursor: at.cursor,
+/// A run of one or more ASCII digits, yielding the consumed slice.
+/// Works on any stream whose `Token = char` (i.e. `&str` and `Partial<&str>`).
+pub fn digits<S: Stream<Token = char>>() -> TakeWhile<S, fn(char) -> bool> {
+    TakeWhile {
+        pred: |c: char| c.is_ascii_digit(),
+        min: 1,
+        _phantom: PhantomData,
     }
-}
-
-impl<'i, P: Parser<'i>, const N: usize> Alternatives<'i> for [P; N] {
-    type Output = P::Output;
-    fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
-        let start = *input;
-        let mut reasons = Vec::with_capacity(N);
-        let mut expected = Vec::new();
-        for parser in self {
-            match parser.parse_next(input) {
-                Ok(out) => return Ok(out),
-                Err(err) => {
-                    *input = start;
-                    reasons.push(err.reason);
-                    expected.extend(err.expected);
-                }
-            }
-        }
-        Err(choice_failure(reasons, expected, start))
-    }
-}
-
-macro_rules! impl_alternatives_tuple {
-    ($($idx:tt $param:ident),+) => {
-        impl<'i, O, $($param: Parser<'i, Output = O>),+> Alternatives<'i> for ($($param,)+) {
-            type Output = O;
-            fn choice_parse(&self, input: &mut Input<'i>) -> PResult<'i, O> {
-                let start = *input;
-                let mut reasons = Vec::new();
-                let mut expected = Vec::new();
-                $(
-                    match self.$idx.parse_next(input) {
-                        Ok(out) => return Ok(out),
-                        Err(err) => {
-                            *input = start;
-                            reasons.push(err.reason);
-                            expected.extend(err.expected);
-                        }
-                    }
-                )+
-                Err(choice_failure(reasons, expected, start))
-            }
-        }
-    };
-}
-
-impl_alternatives_tuple!(0 P0, 1 P1);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
-impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
-
-/// [`choice`].
-pub struct ChoiceOf<A> {
-    alternatives: A,
-}
-
-impl<'i, A: Alternatives<'i>> Parser<'i> for ChoiceOf<A> {
-    type Output = A::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, A::Output> {
-        self.alternatives.choice_parse(input)
-    }
-}
-
-/// Tries each alternative in order, returning the first success. Accepts an
-/// array `[p; N]` (same parser type) or a tuple `(a, b, …)` up to arity 8
-/// (different parser types sharing one `Output`).
-pub fn choice<'i, A: Alternatives<'i>>(alternatives: A) -> ChoiceOf<A> {
-    ChoiceOf { alternatives }
-}
-
-/// Generation counterpart of [`Alternatives`]: samples one alternative.
-pub trait GenerateAlternatives {
-    /// Generates input for a randomly chosen alternative.
-    fn generate_alt(&self, gen: &mut Gen, out: &mut String);
-}
-
-impl<P: Generate, const N: usize> GenerateAlternatives for [P; N] {
-    fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
-        if N > 0 {
-            self[gen.below(N)].generate_into(gen, out);
-        }
-    }
-}
-
-macro_rules! impl_generate_alternatives_tuple {
-    ($n:expr; $($idx:tt $param:ident),+) => {
-        impl<$($param: Generate),+> GenerateAlternatives for ($($param,)+) {
-            fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
-                match gen.below($n) {
-                    $( $idx => self.$idx.generate_into(gen, out), )+
-                    _ => {}
-                }
-            }
-        }
-    };
-}
-
-impl_generate_alternatives_tuple!(2; 0 P0, 1 P1);
-impl_generate_alternatives_tuple!(3; 0 P0, 1 P1, 2 P2);
-impl_generate_alternatives_tuple!(4; 0 P0, 1 P1, 2 P2, 3 P3);
-impl_generate_alternatives_tuple!(5; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
-impl_generate_alternatives_tuple!(6; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
-impl_generate_alternatives_tuple!(7; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
-impl_generate_alternatives_tuple!(8; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
-
-impl<A: GenerateAlternatives> Generate for ChoiceOf<A> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        self.alternatives.generate_alt(gen, out);
-    }
-}
-
-// ── Convenience combinators ──────────────────────────────────────────────────
-
-/// [`delimited`].
-pub struct Delimited<A, B, C> {
-    open: A,
-    content: B,
-    close: C,
-}
-
-impl<'i, A: Parser<'i>, B: Parser<'i>, C: Parser<'i>> Parser<'i> for Delimited<A, B, C> {
-    type Output = B::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, B::Output> {
-        self.open.parse_next(input)?;
-        let out = self.content.parse_next(input)?;
-        self.close.parse_next(input)?;
-        Ok(out)
-    }
-}
-
-impl<A: Generate, B: Generate, C: Generate> Generate for Delimited<A, B, C> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        self.open.generate_into(gen, out);
-        self.content.generate_into(gen, out);
-        self.close.generate_into(gen, out);
-    }
-}
-
-/// Parses `content` between `open` and `close`, keeping only `content`'s output.
-/// Sugar for `open.ignore_then(content).then_ignore(close)`.
-pub fn delimited<'i, A, B, C>(open: A, content: B, close: C) -> Delimited<A, B, C>
-where
-    A: Parser<'i>,
-    B: Parser<'i>,
-    C: Parser<'i>,
-{
-    Delimited {
-        open,
-        content,
-        close,
-    }
-}
-
-/// [`separated_by`] / [`separated_by1`].
-pub struct SeparatedBy<I, S> {
-    item: I,
-    sep: S,
-    min: usize,
-}
-
-impl<'i, I: Parser<'i>, S: Parser<'i>> Parser<'i> for SeparatedBy<I, S> {
-    type Output = Vec<I::Output>;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<I::Output>> {
-        let mut items = Vec::new();
-        let start = *input;
-        match self.item.parse_next(input) {
-            Ok(first) => items.push(first),
-            Err(err) => {
-                *input = start;
-                if self.min == 0 {
-                    return Ok(items);
-                }
-                return Err(err);
-            }
-        }
-        loop {
-            // A separator that isn't followed by an item is not consumed (no
-            // trailing separator), so restore to before it and stop.
-            let checkpoint = *input;
-            if self.sep.parse_next(input).is_err() {
-                *input = checkpoint;
-                break;
-            }
-            match self.item.parse_next(input) {
-                Ok(item) => {
-                    if input.rest.len() == checkpoint.rest.len() {
-                        *input = checkpoint; // no progress: avoid looping forever
-                        break;
-                    }
-                    items.push(item);
-                }
-                Err(_) => {
-                    *input = checkpoint;
-                    break;
-                }
-            }
-        }
-        Ok(items)
-    }
-}
-
-impl<I: Generate, S: Generate> Generate for SeparatedBy<I, S> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        let count = self.min + gen.below(3);
-        for i in 0..count {
-            if i > 0 {
-                self.sep.generate_into(gen, out);
-            }
-            self.item.generate_into(gen, out);
-        }
-    }
-}
-
-/// Zero or more `item`s separated by `sep` (no trailing separator), yielding
-/// `Vec<item::Output>`.
-pub fn separated_by<'i, I, S>(item: I, sep: S) -> SeparatedBy<I, S>
-where
-    I: Parser<'i>,
-    S: Parser<'i>,
-{
-    SeparatedBy { item, sep, min: 0 }
-}
-
-/// Like [`separated_by`], but requires at least one item.
-pub fn separated_by1<'i, I, S>(item: I, sep: S) -> SeparatedBy<I, S>
-where
-    I: Parser<'i>,
-    S: Parser<'i>,
-{
-    SeparatedBy { item, sep, min: 1 }
-}
-
-/// [`repeated_until`].
-pub struct RepeatedUntil<P, E> {
-    parser: P,
-    end: E,
-}
-
-impl<'i, P: Parser<'i>, E: Parser<'i>> Parser<'i> for RepeatedUntil<P, E> {
-    type Output = Vec<P::Output>;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, Vec<P::Output>> {
-        let mut items = Vec::new();
-        loop {
-            let checkpoint = *input;
-            // Stop when the terminator matches — without consuming it.
-            if self.end.parse_next(input).is_ok() {
-                *input = checkpoint;
-                break;
-            }
-            *input = checkpoint;
-            match self.parser.parse_next(input) {
-                Ok(item) => {
-                    if input.rest.len() == checkpoint.rest.len() {
-                        *input = checkpoint;
-                        break;
-                    }
-                    items.push(item);
-                }
-                Err(_) => {
-                    *input = checkpoint;
-                    break;
-                }
-            }
-        }
-        Ok(items)
-    }
-}
-
-impl<P: Generate, E> Generate for RepeatedUntil<P, E> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        // The terminator is the following parser's job, not ours.
-        for _ in 0..gen.below(3) {
-            self.parser.generate_into(gen, out);
-        }
-    }
-}
-
-/// Repeats `parser` until `end` would match (the terminator is **not**
-/// consumed), yielding `Vec<parser::Output>`. Sugar for the
-/// `not(end).ignore_then(parser).repeated()` idiom; also stops if `parser` fails.
-pub fn repeated_until<'i, P, E>(parser: P, end: E) -> RepeatedUntil<P, E>
-where
-    P: Parser<'i>,
-    E: Parser<'i>,
-{
-    RepeatedUntil { parser, end }
-}
-
-/// [`empty`].
-pub struct Empty;
-
-impl<'i> Parser<'i> for Empty {
-    type Output = ();
-    fn parse_next(&self, _input: &mut Input<'i>) -> PResult<'i, ()> {
-        Ok(())
-    }
-}
-
-impl Generate for Empty {
-    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
-}
-
-/// Always succeeds without consuming input, yielding `()` (NimbleParsec's
-/// `empty`). Handy as an always-matching final branch of a `choice`.
-pub fn empty() -> Empty {
-    Empty
 }
 
 /// [`integer`].
-pub struct Integer;
-
-impl<'i> Parser<'i> for Integer {
-    type Output = i64;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, i64> {
-        let rest = input.rest;
-        let end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        if end == 0 {
-            return Err(ParseFailure::expecting(
-                "expected an integer",
-                rest,
-                input.cursor,
-            ));
-        }
-        let digits = &rest[..end];
-        match digits.parse::<i64>() {
-            Ok(value) => {
-                input.bump(digits);
-                Ok(value)
-            }
-            Err(_) => Err(ParseFailure::rejected(
-                "integer out of range",
-                rest,
-                input.cursor,
-            )),
-        }
-    }
+pub struct Integer<S: Stream> {
+    _phantom: PhantomData<fn(S)>,
 }
 
-impl Generate for Integer {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        for _ in 0..1 + gen.below(3) {
-            out.push((b'0' + gen.below(10) as u8) as char);
+impl<S: Stream<Token = char>> Parser<S> for Integer<S>
+where
+    S::Slice: AsRef<str>,
+{
+    type Output = i64;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, i64> {
+        let mut end = 0usize;
+        let mut count = 0usize;
+        let mut scan = input.stream;
+        let mut exhausted = false;
+        loop {
+            match scan.first() {
+                Some((c, w)) if c.is_ascii_digit() => {
+                    end += w;
+                    count += 1;
+                    let (_, rest) = scan.split_at(w);
+                    scan = rest;
+                }
+                Some(_) => break,
+                None => {
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+        if count == 0 {
+            if exhausted {
+                return incomplete_or_err(
+                    "expected an integer",
+                    input.stream.as_slice(),
+                    input.cursor,
+                );
+            }
+            return Err(ParseError::Failure(ParseFailure::expecting(
+                "expected an integer",
+                input.stream.as_slice(),
+                input.cursor,
+            )));
+        }
+        let (digit_slice, _) = input.stream.split_at(end);
+        match digit_slice.as_ref().parse::<i64>() {
+            Ok(value) => {
+                input.bump(end);
+                Ok(value)
+            }
+            Err(_) => Err(ParseError::Failure(ParseFailure::rejected(
+                "integer out of range",
+                input.stream.as_slice(),
+                input.cursor,
+            ))),
         }
     }
 }
 
 /// Parses a run of one or more ASCII digits into an `i64` (NimbleParsec's
-/// `integer`), failing if the value overflows `i64`. For other widths or a sign,
-/// compose `digits().try_map(...)`.
-pub fn integer() -> Integer {
-    Integer
+/// `integer`), failing if the value overflows `i64`. For other widths or a
+/// sign, compose `digits().try_map(...)`.
+pub fn integer<S: Stream<Token = char>>() -> Integer<S>
+where
+    S::Slice: AsRef<str>,
+{
+    Integer {
+        _phantom: PhantomData,
+    }
 }
 
-/// [`bytes`].
-pub struct Bytes {
+// ── Leaf parsers — generic take / rest ───────────────────────────────────────
+
+/// [`take`] / [`bytes`].
+pub struct Take<S: Stream> {
     count: usize,
+    _phantom: PhantomData<fn(S)>,
 }
 
-impl<'i> Parser<'i> for Bytes {
-    type Output = &'i str;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, &'i str> {
-        let rest = input.rest;
-        if self.count > rest.len() {
-            return Err(ParseFailure::expecting(
-                format!("expected {} bytes", self.count),
-                rest,
+impl<S: Stream> Parser<S> for Take<S> {
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Slice> {
+        if input.stream.len() < self.count {
+            return incomplete_or_err(
+                &format!("expected {} bytes", self.count),
+                input.stream.as_slice(),
                 input.cursor,
-            ));
+            );
         }
-        if !rest.is_char_boundary(self.count) {
-            // `&str` input can only be split on a codepoint boundary; true
-            // arbitrary-byte parsing needs byte-slice input (a future milestone).
-            return Err(ParseFailure::rejected(
+        if !input.stream.is_valid_split(self.count) {
+            return Err(ParseError::Failure(ParseFailure::rejected(
                 format!(
-                    "{} bytes does not land on a UTF-8 character boundary",
+                    "{} bytes does not land on a valid boundary \
+                     (e.g. a UTF-8 codepoint boundary for text streams)",
                     self.count
                 ),
-                rest,
+                input.stream.as_slice(),
                 input.cursor,
-            ));
+            )));
         }
-        let consumed = &rest[..self.count];
-        input.bump(consumed);
+        let (consumed, _) = input.stream.split_at(self.count);
+        input.bump(self.count);
         Ok(consumed)
     }
 }
 
-impl Generate for Bytes {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        // ASCII characters are one byte each, so `count` of them is `count` bytes.
-        for _ in 0..self.count {
-            out.push(gen.char_matching(&|c: char| c.is_ascii_alphanumeric()));
+/// Consumes exactly `count` base units, yielding them as `S::Slice`.
+///
+/// On `&str` streams, `count` must land on a UTF-8 codepoint boundary (same
+/// constraint as before, now surfaced as a [`ParseFailure`] rather than a panic).
+/// On `&[u8]` streams, any `count` is valid.
+///
+/// NimbleParsec's `bytes(n)` is an alias for this combinator.
+pub fn take<S: Stream>(count: usize) -> Take<S> {
+    Take {
+        count,
+        _phantom: PhantomData,
+    }
+}
+
+/// Alias for [`take`] — NimbleParsec's `bytes(n)`.
+///
+/// On `&str` streams behaves identically to the old `bytes(n)` (counts UTF-8
+/// bytes, fails off a char boundary). On `&[u8]` streams any count is valid.
+pub fn bytes<S: Stream>(count: usize) -> Take<S> {
+    Take {
+        count,
+        _phantom: PhantomData,
+    }
+}
+
+/// [`rest`].
+pub struct Rest<S: Stream> {
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream> Parser<S> for Rest<S> {
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Slice> {
+        let n = input.stream.len();
+        let consumed = input.stream.as_slice();
+        input.bump(n);
+        Ok(consumed)
+    }
+}
+
+/// Consumes all remaining input, yielding it as `S::Slice`.
+pub fn rest<S: Stream>() -> Rest<S> {
+    Rest {
+        _phantom: PhantomData,
+    }
+}
+
+// ── Leaf parsers — byte-stream-specific (Phase 2) ─────────────────────────────
+
+/// [`byte`].
+pub struct Byte<S: Stream<Token = u8>> {
+    expected: u8,
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream<Token = u8>> Parser<S> for Byte<S> {
+    type Output = u8;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, u8> {
+        match input.stream.first() {
+            Some((b, 1)) if b == self.expected => {
+                input.bump(1);
+                Ok(b)
+            }
+            Some((b, _)) => Err(ParseError::Failure(ParseFailure::expecting(
+                format!("expected byte 0x{:02x}, found 0x{:02x}", self.expected, b),
+                input.stream.as_slice(),
+                input.cursor,
+            ))),
+            None => incomplete_or_err(
+                &format!("expected byte 0x{:02x}", self.expected),
+                input.stream.as_slice(),
+                input.cursor,
+            ),
         }
     }
 }
 
-/// Consumes exactly `count` bytes, yielding them as a `&str` (NimbleParsec's
-/// `bytes`). Because the input is UTF-8 text, `count` must land on a character
-/// boundary; otherwise the parse fails. (Arbitrary, possibly non-UTF-8 byte
-/// parsing awaits byte-slice input — see the roadmap.)
-pub fn bytes(count: usize) -> Bytes {
-    Bytes { count }
+/// Matches a single specific byte value (NimbleParsec's single-byte
+/// `ascii_char` range, generalised). Only available on byte streams
+/// (`Token = u8`).
+pub fn byte<S: Stream<Token = u8>>(b: u8) -> Byte<S> {
+    Byte {
+        expected: b,
+        _phantom: PhantomData,
+    }
 }
+
+/// [`byte_range`].
+pub struct ByteRange<S: Stream<Token = u8>> {
+    lo: u8,
+    hi: u8,
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream<Token = u8>> Parser<S> for ByteRange<S> {
+    type Output = u8;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, u8> {
+        match input.stream.first() {
+            Some((b, _)) if b >= self.lo && b <= self.hi => {
+                input.bump(1);
+                Ok(b)
+            }
+            Some(_) => Err(ParseError::Failure(ParseFailure::expecting(
+                format!("expected byte in 0x{:02x}..=0x{:02x}", self.lo, self.hi),
+                input.stream.as_slice(),
+                input.cursor,
+            ))),
+            None => incomplete_or_err(
+                &format!("expected byte in 0x{:02x}..=0x{:02x}", self.lo, self.hi),
+                input.stream.as_slice(),
+                input.cursor,
+            ),
+        }
+    }
+}
+
+/// Matches a single byte in the inclusive range `[lo, hi]` (Elixir
+/// `ascii_char` range parity). Only available on byte streams.
+pub fn byte_range<S: Stream<Token = u8>>(lo: u8, hi: u8) -> ByteRange<S> {
+    ByteRange {
+        lo,
+        hi,
+        _phantom: PhantomData,
+    }
+}
+
+// ── Binary numeric parsers (Phase 2) ─────────────────────────────────────────
+
+macro_rules! impl_binary_num {
+    ($Struct:ident, $fn_name:ident, $out:ty, $n_bytes:expr, $from_bytes:ident, $doc:literal) => {
+        #[doc = $doc]
+        pub struct $Struct<S: Stream<Token = u8>> {
+            _phantom: PhantomData<fn(S)>,
+        }
+
+        impl<S: Stream<Token = u8>> Parser<S> for $Struct<S>
+        where
+            S::Slice: AsRef<[u8]>,
+        {
+            type Output = $out;
+            fn parse_next(&self, input: &mut Input<S>) -> PResult<S, $out> {
+                const N: usize = $n_bytes;
+                if input.stream.len() < N {
+                    return incomplete_or_err(
+                        concat!(
+                            "expected ",
+                            stringify!($n_bytes),
+                            " bytes for ",
+                            stringify!($out)
+                        ),
+                        input.stream.as_slice(),
+                        input.cursor,
+                    );
+                }
+                let (slice, _) = input.stream.split_at(N);
+                let src = slice.as_ref();
+                let mut arr = [0u8; N];
+                arr.copy_from_slice(&src[..N]);
+                input.bump(N);
+                Ok(<$out>::$from_bytes(arr))
+            }
+        }
+
+        #[doc = $doc]
+        pub fn $fn_name<S: Stream<Token = u8>>() -> $Struct<S>
+        where
+            S::Slice: AsRef<[u8]>,
+        {
+            $Struct {
+                _phantom: PhantomData,
+            }
+        }
+    };
+}
+
+impl_binary_num!(BeU16, be_u16, u16, 2, from_be_bytes, "Big-endian `u16`.");
+impl_binary_num!(BeU32, be_u32, u32, 4, from_be_bytes, "Big-endian `u32`.");
+impl_binary_num!(BeU64, be_u64, u64, 8, from_be_bytes, "Big-endian `u64`.");
+impl_binary_num!(LeU16, le_u16, u16, 2, from_le_bytes, "Little-endian `u16`.");
+impl_binary_num!(LeU32, le_u32, u32, 4, from_le_bytes, "Little-endian `u32`.");
+impl_binary_num!(LeU64, le_u64, u64, 8, from_le_bytes, "Little-endian `u64`.");
+impl_binary_num!(BeI16, be_i16, i16, 2, from_be_bytes, "Big-endian `i16`.");
+impl_binary_num!(BeI32, be_i32, i32, 4, from_be_bytes, "Big-endian `i32`.");
+impl_binary_num!(BeI64, be_i64, i64, 8, from_be_bytes, "Big-endian `i64`.");
+impl_binary_num!(LeI16, le_i16, i16, 2, from_le_bytes, "Little-endian `i16`.");
+impl_binary_num!(LeI32, le_i32, i32, 4, from_le_bytes, "Little-endian `i32`.");
+impl_binary_num!(LeI64, le_i64, i64, 8, from_le_bytes, "Little-endian `i64`.");
+impl_binary_num!(BeF32, be_f32, f32, 4, from_be_bytes, "Big-endian `f32`.");
+impl_binary_num!(BeF64, be_f64, f64, 8, from_be_bytes, "Big-endian `f64`.");
+impl_binary_num!(LeF32, le_f32, f32, 4, from_le_bytes, "Little-endian `f32`.");
+impl_binary_num!(LeF64, le_f64, f64, 8, from_le_bytes, "Little-endian `f64`.");
+
+// ── utf8_char — text on bytes (Phase 3) ─────────────────────────────────────
+
+/// [`utf8_char`].
+pub struct Utf8Char<S: Stream<Token = u8>> {
+    _phantom: PhantomData<fn(S)>,
+}
+
+/// Decodes one UTF-8 codepoint from a **byte** stream (`&[u8]` or
+/// `Partial<&[u8]>`), yielding a `char`. This is the bridge that lets text
+/// grammars run on raw byte input — the analogue of Elixir's `utf8_char`.
+///
+/// Fails (hard error) if the bytes do not form a valid UTF-8 sequence.
+/// Returns `Incomplete` at end-of-buffer on partial streams.
+pub fn utf8_char<S: Stream<Token = u8>>() -> Utf8Char<S>
+where
+    S::Slice: AsRef<[u8]>,
+{
+    Utf8Char {
+        _phantom: PhantomData,
+    }
+}
+
+impl<S: Stream<Token = u8>> Parser<S> for Utf8Char<S>
+where
+    S::Slice: AsRef<[u8]>,
+{
+    type Output = char;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, char> {
+        match input.stream.first() {
+            None => {
+                incomplete_or_err(
+                    "expected UTF-8 character",
+                    input.stream.as_slice(),
+                    input.cursor,
+                )
+            }
+            Some((first_byte, _)) => {
+                let seq_len: usize = match first_byte {
+                    0x00..=0x7F => 1,
+                    0xC0..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    0xF0..=0xF7 => 4,
+                    _ => {
+                        return Err(ParseError::Failure(ParseFailure::rejected(
+                            format!("invalid UTF-8 start byte 0x{:02x}", first_byte),
+                            input.stream.as_slice(),
+                            input.cursor,
+                        )))
+                    }
+                };
+                if input.stream.len() < seq_len {
+                    return incomplete_or_err(
+                        "expected complete UTF-8 sequence",
+                        input.stream.as_slice(),
+                        input.cursor,
+                    );
+                }
+                let (slice, _) = input.stream.split_at(seq_len);
+                let raw = slice.as_ref();
+                match std::str::from_utf8(raw) {
+                    Ok(s) => {
+                        let c = s.chars().next().unwrap();
+                        input.bump(seq_len);
+                        Ok(c)
+                    }
+                    Err(_) => Err(ParseError::Failure(ParseFailure::rejected(
+                        "invalid UTF-8 byte sequence",
+                        input.stream.as_slice(),
+                        input.cursor,
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+// ── length_take (Phase 5) ─────────────────────────────────────────────────────
+
+/// [`length_take`].
+pub struct LengthTake<P> {
+    prefix: P,
+}
+
+impl<S: Stream, P: Parser<S, Output = usize>> Parser<S> for LengthTake<P> {
+    type Output = S::Slice;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, S::Slice> {
+        let n = self.prefix.parse_next(input)?;
+        if input.stream.len() < n {
+            return incomplete_or_err(
+                &format!("expected {} base units after length prefix", n),
+                input.stream.as_slice(),
+                input.cursor,
+            );
+        }
+        if !input.stream.is_valid_split(n) {
+            return Err(ParseError::Failure(ParseFailure::rejected(
+                format!("{} does not land on a valid split boundary", n),
+                input.stream.as_slice(),
+                input.cursor,
+            )));
+        }
+        let (consumed, _) = input.stream.split_at(n);
+        input.bump(n);
+        Ok(consumed)
+    }
+}
+
+/// Runs `prefix` to obtain a byte count `n`, then consumes exactly `n` base
+/// units of the stream, yielding them as `S::Slice`.
+///
+/// Idiomatic replacement for `prefix.flat_map(|n| take(n))` for
+/// length-prefixed binary records.
+pub fn length_take<P>(prefix: P) -> LengthTake<P> {
+    LengthTake { prefix }
+}
+
+// ── Tokens<T> — token-slice stream (Phase 5) ─────────────────────────────────
+
+/// A newtype wrapping `&[T]` so it can implement [`Stream`] for arbitrary
+/// token types without conflicting with the `&[u8]` byte-stream impl.
+///
+/// Use this to build a second parse stage that consumes the output of a lexer.
+///
+/// ```ignore
+/// let tokens: Vec<MyToken> = lex(input);
+/// let ast = my_parser.parse(Tokens(&tokens)).unwrap();
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Tokens<'i, T>(pub &'i [T]);
+
+impl<T> crate::StreamIsPartial for Tokens<'_, T> {
+    const PARTIAL: bool = false;
+}
+
+impl<'i, T: Copy + PartialEq + core::fmt::Debug> Stream for Tokens<'i, T> {
+    type Token = T;
+    type Slice = &'i [T];
+
+    fn first(self) -> Option<(T, usize)> {
+        self.0.split_first().map(|(&t, _)| (t, 1))
+    }
+
+    fn split_at(self, n: usize) -> (&'i [T], Self) {
+        let (a, b) = <[T]>::split_at(self.0, n);
+        (a, Tokens(b))
+    }
+
+    fn as_slice(self) -> &'i [T] {
+        self.0
+    }
+
+    fn len(self) -> usize {
+        self.0.len()
+    }
+
+    fn advance_cursor(self, cursor: Cursor, n: usize) -> Cursor {
+        // Token slices don't have meaningful newline tracking; advance
+        // byte_offset by n (treating each token as one unit).
+        Cursor {
+            line: cursor.line,
+            line_start_offset: cursor.line_start_offset,
+            byte_offset: cursor.byte_offset + n,
+        }
+    }
+
+    fn preview(self, max_tokens: usize) -> String {
+        format!("{:?}", &self.0[..max_tokens.min(self.0.len())])
+    }
+}
+
+// ── Eventually ───────────────────────────────────────────────────────────────
 
 /// [`eventually`].
 pub struct Eventually<P> {
     inner: P,
 }
 
-impl<'i, P: Parser<'i>> Parser<'i> for Eventually<P> {
+impl<S: Stream, P: Parser<S>> Parser<S> for Eventually<P> {
     type Output = P::Output;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, P::Output> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
         loop {
             let checkpoint = *input;
             if let Ok(out) = self.inner.parse_next(input) {
                 return Ok(out);
             }
             *input = checkpoint;
-            // The inner parser didn't match here; skip one character and retry.
-            match input.rest.chars().next() {
-                Some(c) => {
-                    let rest = input.rest;
-                    input.bump(&rest[..c.len_utf8()]);
-                }
+            match input.stream.first() {
+                Some((_, w)) => input.bump(w),
                 None => {
-                    return Err(ParseFailure::expecting(
+                    return Err(ParseError::Failure(ParseFailure::expecting(
                         "expected the parser to eventually match",
-                        input.rest,
+                        input.stream.as_slice(),
                         input.cursor,
-                    ))
+                    )))
                 }
             }
         }
     }
 }
 
-impl<P: Generate> Generate for Eventually<P> {
-    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
-        // The match can come immediately (zero skipped prefix), which round-trips.
-        self.inner.generate_into(gen, out);
-    }
-}
-
-/// Skips input one character at a time until `parser` matches, returning its
-/// output (NimbleParsec's `eventually`). Fails if the end of input is reached
-/// first.
-pub fn eventually<'i, P: Parser<'i>>(parser: P) -> Eventually<P> {
+/// Skips input one token at a time until `parser` matches, returning its
+/// output. Fails if end of input is reached first.
+pub fn eventually<P>(parser: P) -> Eventually<P> {
     Eventually { inner: parser }
 }
 
-// ── Recursion ──────────────────────────────────────────────────────────────
+// ── Recursion ─────────────────────────────────────────────────────────────────
 
-/// A forward-declared, self-referential parser, enabling recursive grammars
-/// (the typed analogue of [`crate::recursive`]). Built by [`recursive`]; cloning
-/// shares the same definition. Recursion depth is bounded by the crate-wide cap
-/// ([`crate::DEFAULT_MAX_RECURSION_DEPTH`]), returning a [`ParseFailure`] rather
-/// than overflowing the stack.
-pub struct Recursive<'i, O> {
-    cell: Rc<OnceCell<Box<dyn Parser<'i, Output = O> + 'i>>>,
+/// A forward-declared, self-referential parser built by [`recursive`].
+/// Cloning shares the same definition via an `Rc`. Recursion depth is bounded
+/// by [`DEFAULT_MAX_RECURSION_DEPTH`] (configurable via
+/// [`Parser::parse_with_max_depth`]).
+///
+/// The lifetime `'a` bounds the parsers stored inside: they may hold references
+/// that live at least as long as `'a`. For `&'static str` streams `'a = 'static`
+/// is the natural choice; for shorter-lived streams (e.g. `&'i str` inside a
+/// function) `'a` is inferred to match the stream lifetime.
+pub struct Recursive<'a, S: Stream, O> {
+    cell: Rc<OnceCell<Box<dyn Parser<S, Output = O> + 'a>>>,
 }
 
-impl<'i, O> Clone for Recursive<'i, O> {
+impl<'a, S: Stream, O> Clone for Recursive<'a, S, O> {
     fn clone(&self) -> Self {
-        Self {
+        Recursive {
             cell: Rc::clone(&self.cell),
         }
     }
 }
 
-impl<'i, O> Parser<'i> for Recursive<'i, O> {
+impl<'a, S: Stream, O> Parser<S> for Recursive<'a, S, O> {
     type Output = O;
-    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, O> {
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, O> {
         let parser = self
             .cell
             .get()
             .expect("recursive parser used before it was defined");
-        // Spend one unit of the shared recursion budget per reference crossing,
-        // failing gracefully at zero instead of overflowing the stack.
-        let budget = crate::RECURSION_BUDGET.with(std::cell::Cell::get);
+        let budget = crate::RECURSION_BUDGET.with(Cell::get);
         if budget == 0 {
-            return Err(ParseFailure::rejected(
+            return Err(ParseError::Failure(ParseFailure::rejected(
                 "maximum recursion depth exceeded",
-                input.rest,
+                input.stream.as_slice(),
                 input.cursor,
-            ));
+            )));
         }
         crate::RECURSION_BUDGET.with(|b| b.set(budget - 1));
         let result = parser.parse_next(input);
@@ -1471,11 +1645,19 @@ impl<'i, O> Parser<'i> for Recursive<'i, O> {
 }
 
 /// Builds a recursive parser. `build` receives a handle usable within the
-/// definition it returns, mirroring [`crate::recursive`].
-pub fn recursive<'i, O, P, F>(build: F) -> Recursive<'i, O>
+/// definition it returns — enabling self-referential grammars.
+///
+/// The lifetime `'a` is the lifetime bound on the parsers stored inside the
+/// recursive definition. For most use cases it is inferred automatically:
+/// - With `&'static str` streams all built-in parsers are `'static`, so `'a`
+///   defaults to `'static`.
+/// - Inside a function returning `impl Parser<&'i str, …>`, `'a` is inferred as
+///   `'i`, allowing the inner parsers to hold references scoped to that lifetime.
+pub fn recursive<'a, S, O, P, F>(build: F) -> Recursive<'a, S, O>
 where
-    P: Parser<'i, Output = O> + 'i,
-    F: FnOnce(Recursive<'i, O>) -> P,
+    S: Stream,
+    P: Parser<S, Output = O> + 'a,
+    F: FnOnce(Recursive<'a, S, O>) -> P,
 {
     let handle = Recursive {
         cell: Rc::new(OnceCell::new()),
@@ -1485,11 +1667,9 @@ where
     handle
 }
 
-// ── Generation ───────────────────────────────────────────────────────────────
+// ── Generation ────────────────────────────────────────────────────────────────
 
-/// Deterministic source of randomness for [`generate`]. Opaque; seeded by
-/// `generate`'s `seed`. Implementations of [`Generate`] thread one of these to
-/// sample alternatives, repetition counts, and characters.
+/// Deterministic source of randomness for [`generate`].
 pub struct Gen {
     state: u64,
 }
@@ -1501,7 +1681,6 @@ impl Gen {
         }
     }
 
-    // splitmix64 — a tiny, dependency-free PRNG, ample for sampling grammars.
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
@@ -1511,7 +1690,7 @@ impl Gen {
     }
 
     /// A value in `0..n` (0 when `n == 0`).
-    fn below(&mut self, n: usize) -> usize {
+    pub fn below(&mut self, n: usize) -> usize {
         if n == 0 {
             0
         } else {
@@ -1519,14 +1698,13 @@ impl Gen {
         }
     }
 
-    fn coin(&mut self) -> bool {
+    /// Coin flip.
+    pub fn coin(&mut self) -> bool {
         self.next_u64() & 1 == 1
     }
 
-    // A character satisfying `pred`, sampled from a printable pool (then a wider
-    // ASCII scan). Best-effort: a predicate matching no printable ASCII yields a
-    // fallback that may not round-trip.
-    fn char_matching(&mut self, pred: &dyn Fn(char) -> bool) -> char {
+    /// A character satisfying `pred`, sampled from a printable pool.
+    pub fn char_matching(&mut self, pred: &dyn Fn(char) -> bool) -> char {
         const POOL: &[u8] =
             b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-.,:;/()[]";
         let start = self.below(POOL.len());
@@ -1547,21 +1725,17 @@ impl Gen {
     }
 }
 
-/// Produces a random input that the parser accepts, mirroring NimbleParsec's
-/// `generate`. Implemented for the built-in combinators except [`Recursive`], so
-/// [`generate`] type-checks only for **non-recursive** grammars.
-///
-/// Generation is best-effort: it round-trips for grammars built from literals,
-/// sequencing, alternation, optionality, and repetition, but negative assertions
-/// ([`not`]) and predicates that exclude printable ASCII may yield input the
-/// parser then rejects.
+/// Produces a random input string that the parser accepts (for property-based
+/// testing / fuzzing). Implemented for the built-in **text** combinators; byte
+/// and token-slice parsers do not implement `Generate` (use proptest strategies
+/// directly for those). Grammars using [`recursive`] or [`Parser::flat_map`]
+/// are not generatable.
 pub trait Generate {
     /// Appends one sampled instance of this parser's accepted input to `out`.
     fn generate_into(&self, gen: &mut Gen, out: &mut String);
 }
 
-/// Generates a random input accepted by `parser`, seeded by `seed` for
-/// reproducibility. Only available for non-recursive grammars (see [`Generate`]).
+/// Generates a random input accepted by `parser`, seeded by `seed`.
 pub fn generate<G: Generate>(parser: &G, seed: u64) -> String {
     let mut gen = Gen::new(seed);
     let mut out = String::new();
@@ -1569,25 +1743,25 @@ pub fn generate<G: Generate>(parser: &G, seed: u64) -> String {
     out
 }
 
-impl Generate for Literal {
+impl<S: Stream<Token = char> + crate::Compare<&'static str>> Generate for Literal<S, &'static str> {
     fn generate_into(&self, _gen: &mut Gen, out: &mut String) {
         out.push_str(self.lit);
     }
 }
 
-impl Generate for AnyChar {
+impl<S: Stream<Token = char>> Generate for AnyToken<S> {
     fn generate_into(&self, gen: &mut Gen, out: &mut String) {
         out.push(gen.char_matching(&|_| true));
     }
 }
 
-impl<F: Fn(char) -> bool> Generate for Satisfy<F> {
+impl<S: Stream<Token = char>, F: Fn(char) -> bool> Generate for Satisfy<S, F> {
     fn generate_into(&self, gen: &mut Gen, out: &mut String) {
         out.push(gen.char_matching(&self.pred));
     }
 }
 
-impl<F: Fn(char) -> bool> Generate for TakeWhile<F> {
+impl<S: Stream<Token = char>, F: Fn(char) -> bool> Generate for TakeWhile<S, F> {
     fn generate_into(&self, gen: &mut Gen, out: &mut String) {
         let count = self.min + gen.below(3);
         for _ in 0..count {
@@ -1596,8 +1770,32 @@ impl<F: Fn(char) -> bool> Generate for TakeWhile<F> {
     }
 }
 
-impl Generate for Eof {
+impl<S: Stream<Token = char>> Generate for Take<S> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        // Generate ASCII alphanumeric chars (1 byte each on &str streams).
+        for _ in 0..self.count {
+            out.push(gen.char_matching(&|c: char| c.is_ascii_alphanumeric()));
+        }
+    }
+}
+
+impl<S: Stream<Token = char>> Generate for Rest<S> {
     fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+impl<S: Stream> Generate for Eof<S> {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+impl<S: Stream<Token = char>> Generate for Integer<S>
+where
+    S::Slice: AsRef<str>,
+{
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        for _ in 0..1 + gen.below(3) {
+            out.push((b'0' + gen.below(10) as u8) as char);
+        }
+    }
 }
 
 impl<P: Generate, F> Generate for Map<P, F> {
@@ -1719,8 +1917,6 @@ impl<P: Generate> Generate for Repeated<P> {
     }
 }
 
-// Zero-width assertions contribute no input — and need no inner `Generate`, so a
-// grammar can still be generatable even with a non-generatable assertion inside.
 impl<P> Generate for Lookahead<P> {
     fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
 }
@@ -1729,124 +1925,460 @@ impl<P> Generate for Not<P> {
     fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
 }
 
-/// NimbleParsec-terminology aliases over the idiomatic core, for readers porting
-/// from Elixir. Every item delegates to the core with no behavioral difference;
-/// `use nimble_parsec_rs::nimble::*;` gives the NimbleParsec vocabulary as free
-/// functions (the pipeline style ports closely).
-///
-/// Combinators that are methods in the core (`map`, `optional`, `repeat`, …) are
-/// offered here as free functions taking the parser first. A few NimbleParsec
-/// combinators are intentionally **absent** because aliasing them would re-import
-/// the untyped term-list model the typed surface removes: `tag` / `unwrap_and_tag`
-/// (use `map` into your own enum/struct), `reduce` (use [`fold`](super::Parser::fold)),
-/// and `wrap` (the output is already a typed value, not a flat list).
+impl<P: Generate> Generate for Eventually<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+// ── Choice / Alternatives ─────────────────────────────────────────────────────
+
+/// A set of alternatives for [`choice`] — implemented for homogeneous arrays
+/// `[P; N]` and for heterogeneous tuples `(A, B, …)` up to arity 8.
+pub trait Alternatives<S: Stream> {
+    /// The shared output type of every alternative.
+    type Output;
+    /// Tries each alternative in order, returning the first success or a
+    /// failure unioning the alternatives' expectations.
+    fn choice_parse(&self, input: &mut Input<S>) -> PResult<S, Self::Output>;
+}
+
+fn choice_failure<S: Stream>(
+    reasons: Vec<String>,
+    expected: Vec<String>,
+    at: Input<S>,
+) -> ParseError<S> {
+    ParseError::Failure(ParseFailure {
+        reason: if reasons.is_empty() {
+            "choice has no options".to_string()
+        } else {
+            reasons.join(" or ")
+        },
+        expected,
+        rest: at.stream.as_slice(),
+        cursor: at.cursor,
+    })
+}
+
+impl<S: Stream, P: Parser<S>, const N: usize> Alternatives<S> for [P; N] {
+    type Output = P::Output;
+    fn choice_parse(&self, input: &mut Input<S>) -> PResult<S, P::Output> {
+        let start = *input;
+        let mut reasons = Vec::with_capacity(N);
+        let mut expected = Vec::new();
+        for parser in self {
+            match parser.parse_next(input) {
+                Ok(out) => return Ok(out),
+                Err(ParseError::Incomplete(n)) => return Err(ParseError::Incomplete(n)),
+                Err(ParseError::Failure(err)) => {
+                    *input = start;
+                    reasons.push(err.reason);
+                    expected.extend(err.expected);
+                }
+            }
+        }
+        Err(choice_failure(reasons, expected, start))
+    }
+}
+
+macro_rules! impl_alternatives_tuple {
+    ($($idx:tt $param:ident),+) => {
+        impl<S: Stream, O, $($param: Parser<S, Output = O>),+> Alternatives<S> for ($($param,)+) {
+            type Output = O;
+            fn choice_parse(&self, input: &mut Input<S>) -> PResult<S, O> {
+                let start = *input;
+                let mut reasons = Vec::new();
+                let mut expected = Vec::new();
+                $(
+                    match self.$idx.parse_next(input) {
+                        Ok(out) => return Ok(out),
+                        Err(ParseError::Incomplete(n)) => return Err(ParseError::Incomplete(n)),
+                        Err(ParseError::Failure(err)) => {
+                            *input = start;
+                            reasons.push(err.reason);
+                            expected.extend(err.expected);
+                        }
+                    }
+                )+
+                Err(choice_failure(reasons, expected, start))
+            }
+        }
+    };
+}
+
+impl_alternatives_tuple!(0 P0, 1 P1);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
+impl_alternatives_tuple!(0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
+
+/// [`choice`].
+pub struct ChoiceOf<A> {
+    alternatives: A,
+}
+
+impl<S: Stream, A: Alternatives<S>> Parser<S> for ChoiceOf<A> {
+    type Output = A::Output;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, A::Output> {
+        self.alternatives.choice_parse(input)
+    }
+}
+
+/// Tries each alternative in order, returning the first success. Accepts an
+/// array `[p; N]` (same parser type) or a tuple `(a, b, …)` up to arity 8.
+pub fn choice<A>(alternatives: A) -> ChoiceOf<A> {
+    ChoiceOf { alternatives }
+}
+
+/// Generation counterpart of [`Alternatives`]: samples one alternative.
+pub trait GenerateAlternatives {
+    /// Generates input for a randomly chosen alternative.
+    fn generate_alt(&self, gen: &mut Gen, out: &mut String);
+}
+
+impl<P: Generate, const N: usize> GenerateAlternatives for [P; N] {
+    fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
+        if N > 0 {
+            self[gen.below(N)].generate_into(gen, out);
+        }
+    }
+}
+
+macro_rules! impl_generate_alternatives_tuple {
+    ($n:expr; $($idx:tt $param:ident),+) => {
+        impl<$($param: Generate),+> GenerateAlternatives for ($($param,)+) {
+            fn generate_alt(&self, gen: &mut Gen, out: &mut String) {
+                match gen.below($n) {
+                    $( $idx => self.$idx.generate_into(gen, out), )+
+                    _ => {}
+                }
+            }
+        }
+    };
+}
+
+impl_generate_alternatives_tuple!(2; 0 P0, 1 P1);
+impl_generate_alternatives_tuple!(3; 0 P0, 1 P1, 2 P2);
+impl_generate_alternatives_tuple!(4; 0 P0, 1 P1, 2 P2, 3 P3);
+impl_generate_alternatives_tuple!(5; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4);
+impl_generate_alternatives_tuple!(6; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5);
+impl_generate_alternatives_tuple!(7; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6);
+impl_generate_alternatives_tuple!(8; 0 P0, 1 P1, 2 P2, 3 P3, 4 P4, 5 P5, 6 P6, 7 P7);
+
+impl<A: GenerateAlternatives> Generate for ChoiceOf<A> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.alternatives.generate_alt(gen, out);
+    }
+}
+
+// ── Convenience combinators ───────────────────────────────────────────────────
+
+/// [`delimited`].
+pub struct Delimited<A, B, C> {
+    open: A,
+    content: B,
+    close: C,
+}
+
+impl<S: Stream, A: Parser<S>, B: Parser<S>, C: Parser<S>> Parser<S> for Delimited<A, B, C> {
+    type Output = B::Output;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, B::Output> {
+        self.open.parse_next(input)?;
+        let out = self.content.parse_next(input)?;
+        self.close.parse_next(input)?;
+        Ok(out)
+    }
+}
+
+impl<A: Generate, B: Generate, C: Generate> Generate for Delimited<A, B, C> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.open.generate_into(gen, out);
+        self.content.generate_into(gen, out);
+        self.close.generate_into(gen, out);
+    }
+}
+
+/// Parses `content` between `open` and `close`, keeping only `content`'s output.
+pub fn delimited<A, B, C>(open: A, content: B, close: C) -> Delimited<A, B, C> {
+    Delimited {
+        open,
+        content,
+        close,
+    }
+}
+
+/// [`separated_by`] / [`separated_by1`].
+pub struct SeparatedBy<I, Sep> {
+    item: I,
+    sep: Sep,
+    min: usize,
+}
+
+impl<S: Stream, I: Parser<S>, Sep: Parser<S>> Parser<S> for SeparatedBy<I, Sep> {
+    type Output = Vec<I::Output>;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Vec<I::Output>> {
+        let mut items = Vec::new();
+        let start = *input;
+        match self.item.parse_next(input) {
+            Ok(first) => items.push(first),
+            Err(ParseError::Incomplete(n)) => return Err(ParseError::Incomplete(n)),
+            Err(err) => {
+                *input = start;
+                if self.min == 0 {
+                    return Ok(items);
+                }
+                return Err(err);
+            }
+        }
+        loop {
+            let checkpoint = *input;
+            match self.sep.parse_next(input) {
+                Err(ParseError::Incomplete(n)) => {
+                    *input = checkpoint;
+                    if S::PARTIAL {
+                        return Err(ParseError::Incomplete(n));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+                Ok(_) => {}
+            }
+            match self.item.parse_next(input) {
+                Ok(item) => {
+                    if input.stream.len() == checkpoint.stream.len() {
+                        *input = checkpoint;
+                        break;
+                    }
+                    items.push(item);
+                }
+                Err(ParseError::Incomplete(n)) => {
+                    *input = checkpoint;
+                    if S::PARTIAL {
+                        return Err(ParseError::Incomplete(n));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+impl<I: Generate, Sep: Generate> Generate for SeparatedBy<I, Sep> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        let count = self.min + gen.below(3);
+        for i in 0..count {
+            if i > 0 {
+                self.sep.generate_into(gen, out);
+            }
+            self.item.generate_into(gen, out);
+        }
+    }
+}
+
+/// Zero or more `item`s separated by `sep` (no trailing separator).
+pub fn separated_by<I, Sep>(item: I, sep: Sep) -> SeparatedBy<I, Sep> {
+    SeparatedBy { item, sep, min: 0 }
+}
+
+/// Like [`separated_by`], but requires at least one item.
+pub fn separated_by1<I, Sep>(item: I, sep: Sep) -> SeparatedBy<I, Sep> {
+    SeparatedBy { item, sep, min: 1 }
+}
+
+/// [`repeated_until`].
+pub struct RepeatedUntil<P, E> {
+    parser: P,
+    end: E,
+}
+
+impl<S: Stream, P: Parser<S>, E: Parser<S>> Parser<S> for RepeatedUntil<P, E> {
+    type Output = Vec<P::Output>;
+    fn parse_next(&self, input: &mut Input<S>) -> PResult<S, Vec<P::Output>> {
+        let mut items = Vec::new();
+        loop {
+            let checkpoint = *input;
+            if self.end.parse_next(input).is_ok() {
+                *input = checkpoint;
+                break;
+            }
+            *input = checkpoint;
+            match self.parser.parse_next(input) {
+                Ok(item) => {
+                    if input.stream.len() == checkpoint.stream.len() {
+                        *input = checkpoint;
+                        break;
+                    }
+                    items.push(item);
+                }
+                Err(ParseError::Incomplete(n)) => {
+                    *input = checkpoint;
+                    if S::PARTIAL {
+                        return Err(ParseError::Incomplete(n));
+                    }
+                    break;
+                }
+                Err(_) => {
+                    *input = checkpoint;
+                    break;
+                }
+            }
+        }
+        Ok(items)
+    }
+}
+
+impl<P: Generate, E> Generate for RepeatedUntil<P, E> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        for _ in 0..gen.below(3) {
+            self.parser.generate_into(gen, out);
+        }
+    }
+}
+
+/// Repeats `parser` until `end` would match (not consumed), yielding
+/// `Vec<parser::Output>`. Stops if `parser` fails.
+pub fn repeated_until<P, E>(parser: P, end: E) -> RepeatedUntil<P, E> {
+    RepeatedUntil { parser, end }
+}
+
+/// [`empty`].
+pub struct Empty<S: Stream> {
+    _phantom: PhantomData<fn(S)>,
+}
+
+impl<S: Stream> Parser<S> for Empty<S> {
+    type Output = ();
+    fn parse_next(&self, _input: &mut Input<S>) -> PResult<S, ()> {
+        Ok(())
+    }
+}
+
+impl<S: Stream> Generate for Empty<S> {
+    fn generate_into(&self, _gen: &mut Gen, _out: &mut String) {}
+}
+
+/// Always succeeds without consuming input, yielding `()`.
+pub fn empty<S: Stream>() -> Empty<S> {
+    Empty {
+        _phantom: PhantomData,
+    }
+}
+
+// ── NimbleParsec terminology module ──────────────────────────────────────────
+
+/// NimbleParsec-terminology aliases over the idiomatic core, for readers
+/// porting from Elixir. `use nimble_parsec_rs::nimble::*` gives the
+/// NimbleParsec vocabulary as free functions.
 pub mod nimble {
     use super::{
         eof, literal, not, Eof, Ignored, Labelled, Literal, Map, Not, Opt, PostTraverse,
         PreTraverse, Repeated, Then, To, WithByteOffset, WithLine,
     };
+    use crate::Stream;
 
-    // Combinators whose core name already matches NimbleParsec are re-exported so
-    // one `use nimble::*` provides the whole vocabulary, including the `Parser`
-    // trait (needed in scope for the methods the wrappers return).
     pub use super::{
         any, bytes, choice, digits, empty, eventually, integer, lookahead, recursive, satisfy,
         take_while, Parser,
     };
 
     /// NimbleParsec name for [`literal`](super::literal).
-    pub fn string(lit: &'static str) -> Literal {
+    pub fn string<S: Stream + crate::Compare<&'static str>>(
+        lit: &'static str,
+    ) -> Literal<S, &'static str> {
         literal(lit)
     }
 
     /// NimbleParsec name for [`eof`](super::eof).
-    pub fn eos() -> Eof {
+    pub fn eos<S: Stream>() -> Eof<S> {
         eof()
     }
 
-    /// NimbleParsec `concat` — sequence two parsers ([`Parser::then`]).
-    pub fn concat<'i, A: Parser<'i>, B: Parser<'i>>(first: A, second: B) -> Then<A, B> {
+    /// NimbleParsec `concat` — sequence two parsers.
+    pub fn concat<S: Stream, A: Parser<S>, B: Parser<S>>(first: A, second: B) -> Then<A, B> {
         first.then(second)
     }
 
-    /// NimbleParsec `optional` ([`Parser::optional`]).
-    pub fn optional<'i, P: Parser<'i>>(parser: P) -> Opt<P> {
+    /// NimbleParsec `optional`.
+    pub fn optional<S: Stream, P: Parser<S>>(parser: P) -> Opt<P> {
         parser.optional()
     }
 
-    /// NimbleParsec `repeat` ([`Parser::repeated`]).
-    pub fn repeat<'i, P: Parser<'i>>(parser: P) -> Repeated<P> {
+    /// NimbleParsec `repeat`.
+    pub fn repeat<S: Stream, P: Parser<S>>(parser: P) -> Repeated<P> {
         parser.repeated()
     }
 
-    /// NimbleParsec `times` / `duplicate` — repeat exactly `n` times
-    /// ([`Parser::repeated_in`] with `min == max`).
-    pub fn times<'i, P: Parser<'i>>(parser: P, n: usize) -> Repeated<P> {
+    /// NimbleParsec `times` / `duplicate` — repeat exactly `n` times.
+    pub fn times<S: Stream, P: Parser<S>>(parser: P, n: usize) -> Repeated<P> {
         parser.repeated_in(n, n)
     }
 
     /// NimbleParsec `duplicate` — repeat exactly `n` times.
-    pub fn duplicate<'i, P: Parser<'i>>(parser: P, n: usize) -> Repeated<P> {
+    pub fn duplicate<S: Stream, P: Parser<S>>(parser: P, n: usize) -> Repeated<P> {
         parser.repeated_in(n, n)
     }
 
-    /// NimbleParsec `ignore` ([`Parser::ignored`]).
-    pub fn ignore<'i, P: Parser<'i>>(parser: P) -> Ignored<P> {
+    /// NimbleParsec `ignore`.
+    pub fn ignore<S: Stream, P: Parser<S>>(parser: P) -> Ignored<P> {
         parser.ignored()
     }
 
-    /// NimbleParsec `replace` ([`Parser::to`]).
-    pub fn replace<'i, P: Parser<'i>, V: Clone>(parser: P, value: V) -> To<P, V> {
+    /// NimbleParsec `replace`.
+    pub fn replace<S: Stream, P: Parser<S>, V: Clone>(parser: P, value: V) -> To<P, V> {
         parser.to(value)
     }
 
-    /// NimbleParsec `map` ([`Parser::map`]).
-    pub fn map<'i, P, F, U>(parser: P, f: F) -> Map<P, F>
-    where
-        P: Parser<'i>,
-        F: Fn(P::Output) -> U,
-    {
+    /// NimbleParsec `map`.
+    pub fn map<S: Stream, P: Parser<S>, F: Fn(P::Output) -> U, U>(parser: P, f: F) -> Map<P, F> {
         parser.map(f)
     }
 
-    /// NimbleParsec `label` ([`Parser::labelled`]).
-    pub fn label<'i, P: Parser<'i>>(parser: P, label: &'static str) -> Labelled<P> {
+    /// NimbleParsec `label`.
+    pub fn label<S: Stream, P: Parser<S>>(parser: P, label: &'static str) -> Labelled<P> {
         parser.labelled(label)
     }
 
-    /// NimbleParsec `lookahead_not` ([`not`](super::not)).
-    pub fn lookahead_not<'i, P: Parser<'i>>(parser: P) -> Not<P> {
+    /// NimbleParsec `lookahead_not`.
+    pub fn lookahead_not<P>(parser: P) -> Not<P> {
         not(parser)
     }
 
-    /// NimbleParsec `byte_offset` ([`Parser::with_byte_offset`]).
-    pub fn byte_offset<'i, P: Parser<'i>>(parser: P) -> WithByteOffset<P> {
+    /// NimbleParsec `byte_offset`.
+    pub fn byte_offset<S: Stream, P: Parser<S>>(parser: P) -> WithByteOffset<P> {
         parser.with_byte_offset()
     }
 
-    /// NimbleParsec `line` ([`Parser::with_line`]).
-    pub fn line<'i, P: Parser<'i>>(parser: P) -> WithLine<P> {
+    /// NimbleParsec `line`.
+    pub fn line<S: Stream, P: Parser<S>>(parser: P) -> WithLine<P> {
         parser.with_line()
     }
 
-    /// NimbleParsec `debug` ([`Parser::debug`]).
-    pub fn debug<'i, P: Parser<'i>>(parser: P, label: &'static str) -> super::Debug<P> {
+    /// NimbleParsec `debug`.
+    pub fn debug<S: Stream, P: Parser<S>>(parser: P, label: &'static str) -> super::Debug<P> {
         parser.debug(label)
     }
 
-    /// NimbleParsec `post_traverse` ([`Parser::post_traverse`]).
-    pub fn post_traverse<'i, P, F, U>(parser: P, f: F) -> PostTraverse<P, F>
+    /// NimbleParsec `post_traverse`.
+    pub fn post_traverse<S: Stream, P: Parser<S>, F, U>(parser: P, f: F) -> PostTraverse<P, F>
     where
-        P: Parser<'i>,
         F: Fn(P::Output, super::Cursor) -> Result<U, String>,
     {
         parser.post_traverse(f)
     }
 
-    /// NimbleParsec `pre_traverse` ([`Parser::pre_traverse`]).
-    pub fn pre_traverse<'i, P, F, U>(parser: P, f: F) -> PreTraverse<P, F>
+    /// NimbleParsec `pre_traverse`.
+    pub fn pre_traverse<S: Stream, P: Parser<S>, F, U>(parser: P, f: F) -> PreTraverse<P, F>
     where
-        P: Parser<'i>,
         F: Fn(P::Output, super::Cursor) -> Result<U, String>,
     {
         parser.pre_traverse(f)
