@@ -49,6 +49,7 @@ Composition (methods on [`Parser`]):
 - `.labelled(msg)` — override the failure message
 - `.with_byte_offset()` / `.with_line()` — pair the output with the trailing byte offset / `(line, line-start offset)` (NimbleParsec's `byte_offset` / `line`)
 - `.debug(label)` — trace the parser to stderr, passing the output through
+- `.post_traverse(f)` / `.pre_traverse(f)` — fallible transform with the end / start `Cursor` in hand (NimbleParsec's `post_traverse` / `pre_traverse`); thread user _context_ by capturing `Cell`/`RefCell` state in `f` for context-dependent parsing
 
 Run with `.parse(text)` (requires all input consumed), `.parse_partial(text)`
 (returns the remainder), or the `*_with_max_depth` variants.

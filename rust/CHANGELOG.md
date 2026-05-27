@@ -25,6 +25,10 @@ library, replacing the dynamic `Value`-based port.
   `expecting`/`rejected` constructors; `expected` is unioned across `or`/`choice`
   and empty for non-expectation failures (negative assertions, `try_map`
   rejections, the recursion cap).
+- `.post_traverse(f)` / `.pre_traverse(f)`: position-aware fallible transforms
+  (the callback gets the end / start `Cursor` and may fail the parse with
+  `Err(message)`). User context is threaded by capturing interior-mutable state
+  (`Cell`/`RefCell`) in the callback, enabling context-dependent parsing.
 - Position, debug, and generation combinators: `.with_byte_offset()` and
   `.with_line()` pair the output with the trailing position (NimbleParsec's
   `byte_offset` / `line`); `.debug(label)` traces a parser to stderr; and

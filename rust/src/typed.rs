@@ -297,6 +297,34 @@ pub trait Parser<'i> {
     {
         Debug { inner: self, label }
     }
+
+    /// Transforms the output with `f`, which also receives the [`Cursor`]
+    /// **after** the match and may fail the parse by returning `Err(message)`
+    /// (NimbleParsec's `post_traverse`).
+    ///
+    /// User *context* (a symbol table, counters, …) is threaded by capturing
+    /// interior-mutable state (`Cell` / `RefCell`) in `f`: the same captured
+    /// state is shared across every invocation and across sibling combinators,
+    /// enabling context-dependent parsing. (As in winnow, captured state is not
+    /// rolled back when an enclosing `or` / `optional` backtracks.)
+    fn post_traverse<U, F>(self, f: F) -> PostTraverse<Self, F>
+    where
+        Self: Sized,
+        F: Fn(Self::Output, Cursor) -> Result<U, String>,
+    {
+        PostTraverse { inner: self, f }
+    }
+
+    /// Like [`post_traverse`](Parser::post_traverse), but `f` receives the
+    /// [`Cursor`] from **before** the match — handy for tagging a result with
+    /// its start position (NimbleParsec's `pre_traverse`).
+    fn pre_traverse<U, F>(self, f: F) -> PreTraverse<Self, F>
+    where
+        Self: Sized,
+        F: Fn(Self::Output, Cursor) -> Result<U, String>,
+    {
+        PreTraverse { inner: self, f }
+    }
 }
 
 // ── Combinators ──────────────────────────────────────────────────────────────
@@ -619,6 +647,45 @@ impl<'i, P: Parser<'i>> Parser<'i> for Debug<P> {
             Err(err) => eprintln!("[nimble_parsec_rs] {}: failed — {}", self.label, err.reason),
         }
         result
+    }
+}
+
+/// [`Parser::post_traverse`].
+pub struct PostTraverse<P, F> {
+    inner: P,
+    f: F,
+}
+
+impl<'i, P, F, U> Parser<'i> for PostTraverse<P, F>
+where
+    P: Parser<'i>,
+    F: Fn(P::Output, Cursor) -> Result<U, String>,
+{
+    type Output = U;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+        let out = self.inner.parse_next(input)?;
+        (self.f)(out, input.cursor)
+            .map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
+    }
+}
+
+/// [`Parser::pre_traverse`].
+pub struct PreTraverse<P, F> {
+    inner: P,
+    f: F,
+}
+
+impl<'i, P, F, U> Parser<'i> for PreTraverse<P, F>
+where
+    P: Parser<'i>,
+    F: Fn(P::Output, Cursor) -> Result<U, String>,
+{
+    type Output = U;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
+        let before = input.cursor;
+        let out = self.inner.parse_next(input)?;
+        (self.f)(out, before)
+            .map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
     }
 }
 
@@ -1055,6 +1122,18 @@ impl<P: Generate> Generate for WithLine<P> {
 }
 
 impl<P: Generate> Generate for Debug<P> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate, F> Generate for PostTraverse<P, F> {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        self.inner.generate_into(gen, out);
+    }
+}
+
+impl<P: Generate, F> Generate for PreTraverse<P, F> {
     fn generate_into(&self, gen: &mut Gen, out: &mut String) {
         self.inner.generate_into(gen, out);
     }
