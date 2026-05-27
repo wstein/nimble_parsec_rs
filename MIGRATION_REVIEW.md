@@ -1,5 +1,13 @@
 # NimbleParsec -> Rust Migration Review
 
+> **Superseded (2026-05-27).** This staged plan (runtime core → codegen) was
+> followed through phase 1, then the crate was **redesigned to a typed
+> `Parser<Output>` surface** — see [rust/docs/rfcs/0001-typed-parser.md](rust/docs/rfcs/0001-typed-parser.md).
+> The typed combinators are monomorphized by the compiler, so the planned
+> proc-macro codegen phase (step 3) is obsolete. For the current combinator
+> inventory see [PARITY_MATRIX.md](PARITY_MATRIX.md); this document is retained as
+> historical context.
+
 ## Executive Summary
 
 The current repository is a complete Elixir implementation of NimbleParsec with extensive behavior coverage (160 tests passing). Migrating directly to a one-shot Rust rewrite is high risk because NimbleParsec's key value is compile-time specialization, not just parser combinator semantics.

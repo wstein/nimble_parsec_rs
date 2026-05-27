@@ -32,15 +32,26 @@ able to use those primitives to implement higher level combinators.
 
 ## Rust migration
 
-This repository now includes an incremental Rust port in [rust/](rust/).
-The migration review and phased plan are documented in
-[MIGRATION_REVIEW.md](MIGRATION_REVIEW.md).
+This repository includes a Rust port in [rust/](rust/) with an idiomatic,
+**typed** combinator surface: each combinator is generic over its output, so
+grammars compose and type-check at compile time with no runtime tagging, and the
+crate has zero runtime dependencies. See [rust/README.md](rust/README.md) for the
+API, [PARITY_MATRIX.md](PARITY_MATRIX.md) for the combinator-by-combinator
+mapping, and [rust/docs/rfcs/0001-typed-parser.md](rust/docs/rfcs/0001-typed-parser.md)
+for the design.
 
-Current Rust scope covers the full runtime combinator surface used by the
-Elixir parser, including `string`, `utf8_char`, `repeat`, `choice`,
-`lookahead_not`, `reduce`, `post_traverse`, `tag`, recursive references, and
-line/byte offset tracking. Compile-time codegen parity is still planned as a
-later phase.
+```rust
+use nimble_parsec_rs::{digits, literal, Parser};
+let number = literal("(")
+    .ignore_then(digits())
+    .then_ignore(literal(")"))
+    .map(|ds: &str| ds.parse::<u32>().unwrap());
+assert_eq!(number.parse("(42)").unwrap(), 42);
+```
+
+An earlier runtime-interpreted, `Value`-based port (with a codegen macro) was
+replaced by this typed design; that history is recorded in
+[MIGRATION_REVIEW.md](MIGRATION_REVIEW.md).
 
 Note this library does not handle low-level binary parsing. In such cases,
 we recommend using [Elixir's bitstring syntax](https://hexdocs.pm/elixir/Kernel.SpecialForms.html#%3C%3C%3E%3E/1).
