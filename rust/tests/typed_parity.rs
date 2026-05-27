@@ -1,7 +1,28 @@
 //! Parity combinators carrying their NimbleParsec names: `empty`, `integer`,
 //! `eventually`.
 
-use nimble_parsec_rs::typed::{empty, eventually, generate, integer, literal, Parser};
+use nimble_parsec_rs::typed::{bytes, empty, eventually, generate, integer, literal, Parser};
+
+#[test]
+fn bytes_takes_exactly_n_bytes_on_a_char_boundary() {
+    assert_eq!(bytes(3).parse_partial("abcdef").unwrap(), ("abc", "def"));
+    assert_eq!(bytes(0).parse_partial("ab").unwrap(), ("", "ab"));
+
+    // Too few bytes available.
+    let err = bytes(5).parse("abc").unwrap_err();
+    assert_eq!(err.reason, "expected 5 bytes");
+
+    // Multi-byte UTF-8: 'é' is 2 bytes. Splitting mid-codepoint fails; taking the
+    // whole codepoint (2 bytes) succeeds.
+    assert!(bytes(1).parse_partial("é!").is_err());
+    assert_eq!(bytes(2).parse_partial("é!").unwrap(), ("é", "!"));
+
+    // Generated input round-trips.
+    for seed in 0..16u64 {
+        let sample = generate(&bytes(4), seed);
+        assert_eq!(bytes(4).parse(&sample).unwrap().len(), 4);
+    }
+}
 
 #[test]
 fn nimbleparsec_terminology_aliases_delegate_to_the_core() {

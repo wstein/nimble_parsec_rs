@@ -1293,6 +1293,57 @@ pub fn integer() -> Integer {
     Integer
 }
 
+/// [`bytes`].
+pub struct Bytes {
+    count: usize,
+}
+
+impl<'i> Parser<'i> for Bytes {
+    type Output = &'i str;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, &'i str> {
+        let rest = input.rest;
+        if self.count > rest.len() {
+            return Err(ParseFailure::expecting(
+                format!("expected {} bytes", self.count),
+                rest,
+                input.cursor,
+            ));
+        }
+        if !rest.is_char_boundary(self.count) {
+            // `&str` input can only be split on a codepoint boundary; true
+            // arbitrary-byte parsing needs byte-slice input (a future milestone).
+            return Err(ParseFailure::rejected(
+                format!(
+                    "{} bytes does not land on a UTF-8 character boundary",
+                    self.count
+                ),
+                rest,
+                input.cursor,
+            ));
+        }
+        let consumed = &rest[..self.count];
+        input.bump(consumed);
+        Ok(consumed)
+    }
+}
+
+impl Generate for Bytes {
+    fn generate_into(&self, gen: &mut Gen, out: &mut String) {
+        // ASCII characters are one byte each, so `count` of them is `count` bytes.
+        for _ in 0..self.count {
+            out.push(gen.char_matching(&|c: char| c.is_ascii_alphanumeric()));
+        }
+    }
+}
+
+/// Consumes exactly `count` bytes, yielding them as a `&str` (NimbleParsec's
+/// `bytes`). Because the input is UTF-8 text, `count` must land on a character
+/// boundary; otherwise the parse fails. (Arbitrary, possibly non-UTF-8 byte
+/// parsing awaits byte-slice input — see the roadmap.)
+pub fn bytes(count: usize) -> Bytes {
+    Bytes { count }
+}
+
 /// [`eventually`].
 pub struct Eventually<P> {
     inner: P,
@@ -1662,8 +1713,8 @@ pub mod nimble {
     // one `use nimble::*` provides the whole vocabulary, including the `Parser`
     // trait (needed in scope for the methods the wrappers return).
     pub use super::{
-        any, choice, digits, empty, eventually, integer, lookahead, recursive, satisfy, take_while,
-        Parser,
+        any, bytes, choice, digits, empty, eventually, integer, lookahead, recursive, satisfy,
+        take_while, Parser,
     };
 
     /// NimbleParsec name for [`literal`](super::literal).

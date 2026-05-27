@@ -30,7 +30,7 @@ Status legend:
 | `integer` | `integer()` | ✅ | A digit run parsed into `i64` (overflow → error). Use `digits().try_map(...)` for other widths or a sign. |
 | `eos` | `eof` (alias `eos`) | ✅ | End-of-input assertion. |
 | `empty` | `empty()` | ✅ | Always succeeds, consuming nothing; handy as a final `choice` branch. |
-| `bytes` | — | ❌ | The crate is `&str`-only for now (see roadmap: generic input). |
+| `bytes` | `bytes(n)` | ✅ | Consumes exactly `n` bytes as `&str`; `n` must land on a UTF-8 character boundary. Arbitrary non-UTF-8 byte parsing still awaits byte-slice input. |
 
 ## Combination & control flow
 
@@ -103,5 +103,6 @@ calls because the output is already typed, and the `defparsec`/`defcombinator`
 codegen family is obsolete because the compiler monomorphizes the combinators
 directly.
 
-Outstanding (tracked in [rust/README.md](rust/README.md)): generic (non-`&str`)
-input, which unblocks `bytes`.
+Outstanding (tracked in [rust/README.md](rust/README.md)): generic / binary
+(non-UTF-8) input — the surface is `&str`-only, so `bytes` requires UTF-8 boundaries
+and there is no byte/bitstring parsing. This is the one remaining structural gap.

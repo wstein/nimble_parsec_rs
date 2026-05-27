@@ -33,6 +33,7 @@ Leaves (free functions):
 - `take_while(pred)` / `take_while1(pred)` — a run of matching characters
 - `digits()` — one or more ASCII digits (as `&str`)
 - `integer()` — a run of digits parsed into an `i64`
+- `bytes(n)` — exactly `n` bytes as a `&str` (must land on a UTF-8 boundary)
 - `eof()` — end of input
 - `empty()` — always succeeds, consuming nothing
 - `eventually(p)` — skip input until `p` matches, then return its output

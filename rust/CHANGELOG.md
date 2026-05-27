@@ -27,7 +27,9 @@ library, replacing the dynamic `Value`-based port.
   rejections, the recursion cap).
 - Parity leaves/combinators carrying their NimbleParsec names: `integer()`
   (a digit run parsed to `i64`, overflow-safe), `eventually(p)` (skip input until
-  `p` matches), and `empty()` (always succeeds, consumes nothing).
+  `p` matches), `empty()` (always succeeds, consumes nothing), and `bytes(n)`
+  (exactly `n` bytes as `&str`, requiring a UTF-8 boundary — arbitrary non-UTF-8
+  bytes still await byte-slice input).
 - A dedicated `nimble` module (`nimble_parsec_rs::nimble`) of NimbleParsec
   terminology as free functions, for readers porting from Elixir — `use
   nimble_parsec_rs::nimble::*` gives the vocabulary in one import. Renames
