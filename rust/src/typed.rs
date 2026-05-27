@@ -1507,24 +1507,36 @@ pub fn length_take<P>(prefix: P) -> LengthTake<P> {
     LengthTake { prefix }
 }
 
-// ── Tokens<T> — token-slice stream (Phase 5) ─────────────────────────────────
+// ── Tokens<T> — kept for backward compatibility ───────────────────────────────
 
-/// A newtype wrapping `&[T]` so it can implement [`Stream`] for arbitrary
-/// token types without conflicting with the `&[u8]` byte-stream impl.
+/// A newtype wrapping `&[T]` that was previously needed because `&[u8]` had a
+/// dedicated `Stream` impl that would conflict with a generic `&[T]` impl.
 ///
-/// Use this to build a second parse stage that consumes the output of a lexer.
+/// **Deprecated since 0.2.0.** Pass `&[T]` (e.g. `tokens.as_slice()`) directly;
+/// the blanket `impl<T> Stream for &[T]` now handles all element types
+/// including `u8`.
 ///
 /// ```ignore
-/// let tokens: Vec<MyToken> = lex(input);
+/// // Before (still compiles but deprecated):
 /// let ast = my_parser.parse(Tokens(&tokens)).unwrap();
+///
+/// // After:
+/// let ast = my_parser.parse(tokens.as_slice()).unwrap();
 /// ```
+#[deprecated(
+    since = "0.2.0",
+    note = "pass `tokens.as_slice()` (type `&[T]`) directly; \
+            the blanket `impl Stream for &[T]` now covers all token types"
+)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Tokens<'i, T>(pub &'i [T]);
 
+#[allow(deprecated)]
 impl<T> crate::StreamIsPartial for Tokens<'_, T> {
     const PARTIAL: bool = false;
 }
 
+#[allow(deprecated)]
 impl<'i, T: Copy + PartialEq + core::fmt::Debug> Stream for Tokens<'i, T> {
     type Token = T;
     type Slice = &'i [T];
@@ -1547,12 +1559,9 @@ impl<'i, T: Copy + PartialEq + core::fmt::Debug> Stream for Tokens<'i, T> {
     }
 
     fn advance_cursor(self, cursor: Cursor, n: usize) -> Cursor {
-        // Token slices don't have meaningful newline tracking; advance
-        // byte_offset by n (treating each token as one unit).
         Cursor {
-            line: cursor.line,
-            line_start_offset: cursor.line_start_offset,
             byte_offset: cursor.byte_offset + n,
+            ..cursor
         }
     }
 

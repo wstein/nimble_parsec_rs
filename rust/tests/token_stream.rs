@@ -1,10 +1,9 @@
 //! Two-phase parsing: a lexer produces `Vec<Token>`, then a grammar consumes
-//! `Tokens<Token>` via the built-in `Stream` impl for `Tokens<'_, T>`.
+//! `&[Token]` via the blanket `Stream` impl for `&[T]`.
 //!
-//! This tests the [`Tokens`] custom stream — the `Stream<Token = T>` path for
-//! arbitrary token sequences, as opposed to `&str` (Token = char) or `&[u8]`
-//! (Token = u8). The idiomatic use case is wiring a hand-written or generated
-//! lexer into a second parser stage.
+//! Since `impl<T: Copy + PartialEq + Debug> Stream for &[T]` is now built into
+//! the crate, no wrapper type is needed. Pass `tokens.as_slice()` (or coerce
+//! `&tokens[..]`) directly to any parser.
 //!
 //! The grammar is a minimal arithmetic expression language:
 //!
@@ -17,7 +16,7 @@
 //! `Recursive<'a, S, O>` IS `Clone` (backed by `Rc`), making it safe to share
 //! a handle across the sequencing operators that consume their arguments.
 
-use nimble_parsec_rs::typed::{any, recursive, satisfy, take, Parser, Tokens};
+use nimble_parsec_rs::typed::{any, recursive, satisfy, take, Parser};
 
 // ── Token definition ──────────────────────────────────────────────────────────
 
@@ -90,14 +89,14 @@ fn lex(input: &str) -> Vec<Token> {
 
 // ── Grammar helpers ───────────────────────────────────────────────────────────
 
-fn tok<'i, F>(pred: F) -> impl Parser<Tokens<'i, Token>, Output = Token>
+fn tok<'i, F>(pred: F) -> impl Parser<&'i [Token], Output = Token>
 where
     F: Fn(Token) -> bool,
 {
     satisfy("token", move |t: Token| pred(t))
 }
 
-fn number<'i>() -> impl Parser<Tokens<'i, Token>, Output = i64> {
+fn number<'i>() -> impl Parser<&'i [Token], Output = i64> {
     satisfy("number", |t: Token| matches!(t, Token::Number(_))).map(|t| {
         let Token::Number(n) = t else { unreachable!() };
         n
@@ -107,11 +106,11 @@ fn number<'i>() -> impl Parser<Tokens<'i, Token>, Output = i64> {
 // ── Expression grammar ────────────────────────────────────────────────────────
 
 // Each grammar level wraps itself in `recursive` so its type is
-// `Recursive<'_, Tokens<Token>, i64>`, which implements `Clone`. This lets the
+// `Recursive<'_, &[Token], i64>`, which implements `Clone`. This lets the
 // same sub-parser be used multiple times inside a combinator chain (e.g. both
 // sides of a binary operator repetition).
 
-fn expr<'i>() -> impl Parser<Tokens<'i, Token>, Output = i64> {
+fn expr<'i>() -> impl Parser<&'i [Token], Output = i64> {
     recursive(|e| {
         // ── factor = Number | '(' expr ')' ────────────────────────────────
         let factor = recursive(|_f| {
@@ -157,10 +156,10 @@ fn expr<'i>() -> impl Parser<Tokens<'i, Token>, Output = i64> {
 
 fn eval(input: &str) -> i64 {
     let tokens = lex(input);
-    // Bind the result to a local before the borrow of `tokens` ends.
+    // tokens.as_slice() has type &[Token] — no wrapper needed.
     let result = expr()
         .then_ignore(tok(|t| t == Token::Eof))
-        .parse(Tokens(&tokens))
+        .parse(tokens.as_slice())
         .unwrap();
     result
 }
@@ -224,7 +223,7 @@ fn tokens_stream_error_on_extra_tokens() {
     let tokens = lex("1 2");
     let result = expr()
         .then_ignore(tok(|t| t == Token::Eof))
-        .parse(Tokens(&tokens));
+        .parse(tokens.as_slice());
     assert!(result.is_err());
 }
 
@@ -233,18 +232,16 @@ fn tokens_stream_error_on_extra_tokens() {
 #[test]
 fn tokens_stream_any_consumes_one_token() {
     let tokens = lex("42");
-    let (tok_val, _rest) = any::<Tokens<Token>>()
-        .parse_partial(Tokens(&tokens))
-        .unwrap();
+    let (tok_val, _rest) = any::<&[Token]>().parse_partial(tokens.as_slice()).unwrap();
     assert_eq!(tok_val, Token::Number(42));
 }
 
 #[test]
 fn tokens_stream_take_returns_slice() {
     let tokens = lex("1 + 2");
-    // `take(2)` on `Tokens<Token>` yields `&[Token; 2]`.
-    let (first_two, _rest) = take::<Tokens<Token>>(2)
-        .parse_partial(Tokens(&tokens))
+    // `take(2)` on `&[Token]` yields `&[Token]` of length 2.
+    let (first_two, _rest) = take::<&[Token]>(2)
+        .parse_partial(tokens.as_slice())
         .unwrap();
     assert_eq!(first_two.len(), 2);
     assert_eq!(first_two[0], Token::Number(1));
@@ -257,11 +254,11 @@ fn tokens_stream_repeated_collect_all_numbers() {
     // collect every `Number` token, ignoring others via `.optional()`.
     let numbers = number()
         .optional()
-        .then_ignore(satisfy::<Tokens<Token>, _>("non-eof", |t: Token| t != Token::Eof).optional())
+        .then_ignore(satisfy::<&[Token], _>("non-eof", |t: Token| t != Token::Eof).optional())
         .repeated()
         .map(|opts: Vec<Option<i64>>| opts.into_iter().flatten().collect::<Vec<_>>())
         .then_ignore(tok(|t| t == Token::Eof))
-        .parse(Tokens(&tokens))
+        .parse(tokens.as_slice())
         .unwrap();
     assert_eq!(numbers, vec![1, 22, 333]);
 }
@@ -269,9 +266,9 @@ fn tokens_stream_repeated_collect_all_numbers() {
 #[test]
 fn tokens_stream_satisfy_matches_specific_variant() {
     let tokens = lex("+ -");
-    let pluses = satisfy::<Tokens<Token>, _>("plus", |t: Token| t == Token::Plus)
+    let pluses = satisfy::<&[Token], _>("plus", |t: Token| t == Token::Plus)
         .repeated()
-        .parse_partial(Tokens(&tokens))
+        .parse_partial(tokens.as_slice())
         .unwrap()
         .0;
     assert_eq!(pluses.len(), 1); // one '+', then '-' stops it
@@ -281,6 +278,6 @@ fn tokens_stream_satisfy_matches_specific_variant() {
 fn tokens_stream_empty_token_sequence() {
     // Just the Eof sentinel — should parse OK with `tok(Eof)`.
     let tokens = lex("");
-    let result = tok(|t: Token| t == Token::Eof).parse(Tokens(&tokens));
+    let result = tok(|t: Token| t == Token::Eof).parse(tokens.as_slice());
     assert!(result.is_ok());
 }
