@@ -10,10 +10,43 @@
 // This replaces the previous hand-written byte-scanning tokenizer; the structural
 // parser (`assemble`/`collect`) and the existing wire/conformance gates
 // (`compile_diff`/`verify`/`fuzz`) are the arbiter of byte-for-byte parity.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// This file doubles as a *worked example* of `nimble_parsec_rs`: a complete,
+// real-world lexer that exercises a broad slice of the crate's surface. It uses
+// both calling styles deliberately — the free combinator functions (`string`,
+// `choice`, `lookahead_not`, `post_traverse`, …), which mirror NimbleParsec's
+// names for readers porting from Elixir, and the fluent `Parser` methods
+// (`.then`, `.ignored`, `.repeated`, `.reduce`, `.tagged`), which read better
+// when chaining. Every fluent method delegates to the free function of the
+// matching name, so the two are interchangeable; pick whichever reads best.
+//
+// Combinator coverage (this file + its sibling `np_expr.rs`):
+//
+//   Demonstrated here:
+//     string, utf8_char, ascii_string (+ AsciiPredicate ranges)   — leaves
+//     concat (`.then`), ignore (`.ignored`)                       — sequencing
+//     repeat (`.repeated`), choice                                — control flow
+//     lookahead_not                                               — negative assertion
+//     reduce (`.reduce`), tag (`.tagged`)                         — result shaping
+//     post_traverse                                               — context-aware
+//                                                                    validation + the
+//                                                                    end-offset injection,
+//                                                                    and *failing* the parse
+//   Demonstrated in `np_expr.rs`:
+//     recursive / ParserRef, optional, `.or`, Utf8Predicate
+//   Purpose-built alternatives worth knowing (not needed by this grammar):
+//     byte_offset / line — emit position metadata directly, instead of the manual
+//       `post_traverse` offset injection used here (kept manual so the decoder gets
+//       a flat `[content…, end]` shape); map / wrap / replace / unwrap_and_tag —
+//       other result transforms; times / duplicate / repeat_while — bounded or
+//       predicate-driven repetition; eventually / lookahead — scan-ahead; eos —
+//       end-of-input assertion; label — override a failure message (no effect here,
+//       since `choice` makes the top-level grammar total). See the crate README.
 
 use nimble_parsec_rs::{
-    ascii_string, choice, ignore, lookahead_not, post_traverse, repeat, string, utf8_char,
-    AsciiPredicate, Integer, Parser, Value,
+    ascii_string, choice, lookahead_not, post_traverse, string, utf8_char, AsciiPredicate,
+    Integer, Parser, Value,
 };
 
 use crate::{classify, extract_trim, flush_text, trim_trailing_text, CompileError, Token};
@@ -42,6 +75,8 @@ enum LexKind {
 
 // ── do_lex grammar (mirrors `Stem.Parser.do_lex`) ────────────────────────────
 
+// The character class for a tag/raw-block name: `[A-Za-z0-9_-]`. `AsciiPredicate`
+// ranges and single chars compose into the set `ascii_string` accepts.
 fn name_predicates() -> Vec<AsciiPredicate> {
     vec![
         AsciiPredicate::Range(b'a'..=b'z'),
@@ -52,8 +87,8 @@ fn name_predicates() -> Vec<AsciiPredicate> {
     ]
 }
 
-// Collapse a run of `utf8_char` codepoint integers into a string, the role
-// Elixir fills with `reduce({List, :to_string, []})`.
+// Collapse a run of `utf8_char` codepoint integers into a string — the `reduce`
+// callback fills the role Elixir gives `reduce({List, :to_string, []})`.
 fn codepoints_to_string(tokens: Vec<Value>) -> Value {
     let text: String = tokens
         .iter()
@@ -65,9 +100,14 @@ fn codepoints_to_string(tokens: Vec<Value>) -> Value {
     Value::Str(text)
 }
 
-// Append the byte offset just past `inner` (its end position) and tag the unit,
-// so the assembler can recover each unit's span. Mirrors Elixir's
-// `post_traverse(inject_end_pos)` followed by `tag/1`.
+// Wrap `inner` so the assembler can recover each unit's span: `post_traverse`
+// runs a closure *after* `inner` with the post-parse cursor in hand, letting us
+// append the byte offset just past the match; `.tagged` then names the unit.
+// Mirrors Elixir's `post_traverse(inject_end_pos)` followed by `tag/1`.
+//
+// (`nimble_parsec_rs` also ships a `byte_offset` combinator that emits the
+// position directly; we hand-roll it via `post_traverse` only to keep a flat
+// `[content…, end]` token shape that `lexeme_from_value` can pop in order.)
 fn tagged_with_end(inner: Parser, tag: &'static str) -> Parser {
     post_traverse(inner, |mut tokens, context, cursor| {
         tokens.push(Value::Int(Integer::from(cursor.byte_offset)));
@@ -76,49 +116,66 @@ fn tagged_with_end(inner: Parser, tag: &'static str) -> Parser {
     .tagged(tag)
 }
 
-// `repeat(utf8_char)` stopping before `stop`, reduced to a string.
+// `repeat`-of-`utf8_char` stopping before `stop`, reduced to a string. Shown in
+// fluent style: each `utf8_char` is gated by a `lookahead_not` (so we never
+// consume the terminator), the pair is `.repeated`, and the run is `.reduce`d.
 fn chars_until(stop: &'static str) -> Parser {
-    repeat(lookahead_not(string(stop)).then(utf8_char(vec![])), 0, None)
+    lookahead_not(string(stop))
+        .then(utf8_char(vec![]))
+        .repeated(0, None)
         .reduce(codepoints_to_string)
 }
 
+// A maximal run of text, stopping before the next `{{`. Same shape as
+// `chars_until` but with a minimum of 1 (an empty text run carries no meaning).
 fn text_chunk() -> Parser {
     tagged_with_end(
-        repeat(lookahead_not(string("{{")).then(utf8_char(vec![])), 1, None)
+        lookahead_not(string("{{"))
+            .then(utf8_char(vec![]))
+            .repeated(1, None)
             .reduce(codepoints_to_string),
         "text",
     )
 }
 
+// `{{!-- … --}}` — opener, body (ignored), closer. `.ignored()` discards the
+// delimiters' and body's tokens; only the unit's tag + end offset survive.
 fn block_comment() -> Parser {
     tagged_with_end(
-        ignore(string("{{!--"))
-            .then(ignore(chars_until("--}}")))
-            .then(ignore(string("--}}"))),
+        string("{{!--")
+            .ignored()
+            .then(chars_until("--}}").ignored())
+            .then(string("--}}").ignored()),
         "block_comment",
     )
 }
 
+// `{{! … }}` — the single-brace inline comment variant.
 fn inline_comment() -> Parser {
     tagged_with_end(
-        ignore(string("{{!"))
-            .then(ignore(chars_until("}}")))
-            .then(ignore(string("}}"))),
+        string("{{!")
+            .ignored()
+            .then(chars_until("}}").ignored())
+            .then(string("}}").ignored()),
         "inline_comment",
     )
 }
 
+// `{{{{#name}}}}…{{{{/name}}}}` — the open name, verbatim content, and close name
+// are captured; the delimiters are ignored.
 fn raw_block() -> Parser {
-    let parser = ignore(string("{{{{#"))
+    let parser = string("{{{{#")
+        .ignored()
         .then(ascii_string(name_predicates(), 1, None))
-        .then(ignore(string("}}}}")))
+        .then(string("}}}}").ignored())
         .then(chars_until("{{{{/"))
-        .then(ignore(string("{{{{/")))
+        .then(string("{{{{/").ignored())
         .then(ascii_string(name_predicates(), 1, None))
-        .then(ignore(string("}}}}")));
+        .then(string("}}}}").ignored());
 
-    // Validate the open/close names match and keep only the content, mirroring
-    // Elixir's `validate_and_reduce_raw_block`.
+    // `post_traverse` can also *reject* the parse: here it validates that the
+    // open/close names match and keeps only the content, mirroring Elixir's
+    // `validate_and_reduce_raw_block`. Returning `Err` turns into a parse failure.
     let validated = post_traverse(parser, |tokens, context, _cursor| match tokens.as_slice() {
         [Value::Str(open), Value::Str(content), Value::Str(close)] => {
             if open == close {
@@ -134,37 +191,41 @@ fn raw_block() -> Parser {
     tagged_with_end(validated, "raw_block")
 }
 
+// `{{{ … }}}` — a triple-brace raw tag; its inner text is kept verbatim.
 fn raw_tag() -> Parser {
     tagged_with_end(
-        ignore(string("{{{"))
+        string("{{{")
+            .ignored()
             .then(chars_until("}}}"))
-            .then(ignore(string("}}}"))),
+            .then(string("}}}").ignored()),
         "raw_tag",
     )
 }
 
+// `{{ … }}` — the ordinary double-brace tag; inner text kept for classification.
 fn standard_tag() -> Parser {
     tagged_with_end(
-        ignore(string("{{"))
+        string("{{")
+            .ignored()
             .then(chars_until("}}"))
-            .then(ignore(string("}}"))),
+            .then(string("}}").ignored()),
         "standard_tag",
     )
 }
 
+// The whole document: zero or more lexical units. `choice` tries the alternatives
+// in order (longest/most-specific delimiters first so `{{{{` beats `{{{` beats
+// `{{`, and text is the catch-all), and `.repeated(0, None)` tiles the source.
 fn do_lex() -> Parser {
-    repeat(
-        choice(vec![
-            block_comment(),
-            inline_comment(),
-            raw_block(),
-            raw_tag(),
-            standard_tag(),
-            text_chunk(),
-        ]),
-        0,
-        None,
-    )
+    choice(vec![
+        block_comment(),
+        inline_comment(),
+        raw_block(),
+        raw_tag(),
+        standard_tag(),
+        text_chunk(),
+    ])
+    .repeated(0, None)
 }
 
 fn raw_lex(source: &str) -> Result<Vec<Lexeme>, CompileError> {

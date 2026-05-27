@@ -8,15 +8,32 @@
 // bracketed literal keys as atomic — so separators inside them are part of the
 // text, not delimiters. The downstream structural parser is unchanged; this
 // only replaces the hand-written `scan_top_level` scanner.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Read alongside `np_lexer.rs`: together the two files are a worked example of
+// `nimble_parsec_rs`. Where the lexer leans on `post_traverse` and `tag`, this
+// file is the home of the crate's *recursion* support — `recursive` builds the
+// self-referential `paren` grammar that the lexer never needs. It also shows the
+// binary `.or` (sugar for a two-way `choice`), `.optional`, and `Utf8Predicate`.
+//
+// Combinators demonstrated here (see `np_lexer.rs` for the full coverage map):
+//   recursive / ParserRef     — the balanced-paren grammar refers to itself
+//   choice / `.or`            — ordered alternation (n-way and the 2-way sugar)
+//   optional (`.optional`)    — tolerate a missing closing delimiter
+//   lookahead_not             — "any char that doesn't start an atomic chunk"
+//   repeat (`.repeated`)      — maximal runs
+//   concat (`.then`), ignore (`.ignored`), reduce (`.reduce`), tag (`.tagged`)
+//   utf8_char + Utf8Predicate — the whitespace class
 
 use nimble_parsec_rs::{
-    choice, ignore, lookahead_not, optional, recursive, repeat, string, utf8_char, Parser, Value,
+    choice, lookahead_not, recursive, string, utf8_char, Parser, Utf8Predicate, Value,
 };
 
 use crate::Tok;
 
 // Concatenate a combinator's emitted values (literal `string` parts as-is,
-// `utf8_char` codepoints as their char) back into the matched source text.
+// `utf8_char` codepoints as their char) back into the matched source text — the
+// `reduce` callback that turns an atomic chunk into one `Value::Str`.
 fn values_to_string(tokens: Vec<Value>) -> Value {
     let mut text = String::new();
     for value in tokens {
@@ -40,17 +57,17 @@ fn values_to_string(tokens: Vec<Value>) -> Value {
 
 // A double/single-quoted chunk: the delimiter, a run where `\` escapes the next
 // char, then the closing delimiter (tolerated-optional, like the BEAM). Atomic.
+// The inner two-way alternation is written with the fluent `.or` (a `choice` of
+// exactly two); `.optional` makes the closing delimiter forgiving.
 fn quoted(delim: &'static str) -> Parser {
     string(delim)
-        .then(repeat(
-            choice(vec![
-                string("\\").then(utf8_char(vec![])),
-                lookahead_not(string(delim)).then(utf8_char(vec![])),
-            ]),
-            0,
-            None,
-        ))
-        .then(optional(string(delim)))
+        .then(
+            string("\\")
+                .then(utf8_char(vec![]))
+                .or(lookahead_not(string(delim)).then(utf8_char(vec![])))
+                .repeated(0, None),
+        )
+        .then(string(delim).optional())
         .reduce(values_to_string)
 }
 
@@ -58,21 +75,24 @@ fn quoted(delim: &'static str) -> Parser {
 // or escapes. Atomic.
 fn bracket() -> Parser {
     string("[")
-        .then(repeat(
-            lookahead_not(string("]")).then(utf8_char(vec![])),
-            0,
-            None,
-        ))
-        .then(optional(string("]")))
+        .then(
+            lookahead_not(string("]"))
+                .then(utf8_char(vec![]))
+                .repeated(0, None),
+        )
+        .then(string("]").optional())
         .reduce(values_to_string)
 }
 
 // A parenthesised sub-expression: balanced parens with nested quotes/brackets,
-// reduced to its raw source. Recursive, mirroring `Stem.Expression.paren_chunk`.
+// reduced to its raw source. `recursive` hands the closure a handle to the
+// parser being defined, so `paren` can appear inside its own body — mirroring
+// `Stem.Expression.paren_chunk`. (Recursion depth is bounded by the crate; see
+// `Parser::parse_with_max_depth`.)
 fn paren() -> Parser {
     recursive(|paren| {
         string("(")
-            .then(repeat(
+            .then(
                 choice(vec![
                     paren,
                     quoted("\""),
@@ -85,11 +105,10 @@ fn paren() -> Parser {
                         string("'"),
                     ]))
                     .then(utf8_char(vec![])),
-                ]),
-                0,
-                None,
-            ))
-            .then(optional(string(")")))
+                ])
+                .repeated(0, None),
+            )
+            .then(string(")").optional())
             .reduce(values_to_string)
     })
 }
@@ -117,51 +136,47 @@ fn text_char() -> Parser {
 
 // A maximal run of text: atomic chunks and plain chars, reduced to one string.
 fn text_part() -> Parser {
-    repeat(
-        choice(vec![
-            quoted("\""),
-            quoted("'"),
-            paren(),
-            bracket(),
-            text_char(),
-        ]),
-        1,
-        None,
-    )
+    choice(vec![
+        quoted("\""),
+        quoted("'"),
+        paren(),
+        bracket(),
+        text_char(),
+    ])
+    .repeated(1, None)
     .reduce(values_to_string)
     .tagged("text")
 }
 
+// A separator literal: matched, its token discarded (`.ignored`), and emitted as
+// an empty tagged marker the assembler maps to a `Tok`.
 fn separator(literal: &'static str, tag: &'static str) -> Parser {
-    ignore(string(literal)).tagged(tag)
+    string(literal).ignored().tagged(tag)
 }
 
 fn whitespace() -> Parser {
     utf8_char(vec![
-        nimble_parsec_rs::Utf8Predicate::Char('\t'),
-        nimble_parsec_rs::Utf8Predicate::Char('\n'),
-        nimble_parsec_rs::Utf8Predicate::Char('\r'),
-        nimble_parsec_rs::Utf8Predicate::Char(' '),
+        Utf8Predicate::Char('\t'),
+        Utf8Predicate::Char('\n'),
+        Utf8Predicate::Char('\r'),
+        Utf8Predicate::Char(' '),
     ])
     .tagged("ws")
 }
 
 fn top() -> Parser {
-    repeat(
-        choice(vec![
-            // `||`/`&&` before `|` (maximal munch); a lone `&` falls to text.
-            string("||").tagged("reserved"),
-            string("&&").tagged("reserved"),
-            separator("|", "pipe"),
-            separator(",", "comma"),
-            separator("=", "eq"),
-            separator(":", "colon"),
-            whitespace(),
-            text_part(),
-        ]),
-        0,
-        None,
-    )
+    choice(vec![
+        // `||`/`&&` before `|` (maximal munch); a lone `&` falls to text.
+        string("||").tagged("reserved"),
+        string("&&").tagged("reserved"),
+        separator("|", "pipe"),
+        separator(",", "comma"),
+        separator("=", "eq"),
+        separator(":", "colon"),
+        whitespace(),
+        text_part(),
+    ])
+    .repeated(0, None)
 }
 
 // Tokenize a tag's inner text to top-level `Tok`s, matching `scan_top_level`.
