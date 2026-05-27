@@ -116,8 +116,11 @@ let s: String = word.map(|cs| cs.into_iter().collect()).parse("abc")?; // "abc"
    the compiler, so the codegen layer is unnecessary. `compile_parser!` /
    `defparsec!` (and the `parsec_macro` crate) are removed in the cutover (phase 6)
    rather than ported; named parsers become plain `fn … -> impl Parser`.
-5. **Consumer migration.** Move Stem's `np_lexer` / `np_expr` to the typed API
-   behind the existing differential gate (`compile_diff` / `verify` / `fuzz`).
+5. **Consumer migration.** ✅ Expressiveness proven in
+   [`rust/tests/typed_grammar.rs`](../../tests/typed_grammar.rs) — Stem's template
+   lexer rebuilt on the typed API, yielding a typed token `enum` with no `Value`.
+   The live `np_lexer` / `np_expr` swap happens in the Stem repo behind its
+   differential gate (`compile_diff` / `verify` / `fuzz`).
 6. **Remove `Value`-based API → `1.0`.** Delete the dynamic surface once no
    consumer depends on it. (Transitional coexistence during phases 2–5 is a
    migration period, not a shipped compatibility layer.)
