@@ -86,6 +86,7 @@ Status legend:
 | `.ignore_then` / `.then_ignore` | Sequence keeping only the right / left side. |
 | `.to(value)` | Constant replacement (NimbleParsec's `replace`, but typed). |
 | `.try_map(f)` | Fallible/validating transform. |
+| `.flat_map(f)` | Monadic bind — choose the next parser from the output (context-sensitive grammars; no NimbleParsec equivalent). |
 | `.repeated_in(min, max)` / `.repeated_at_least(min)` | Bounded repetition. |
 | `delimited(open, content, close)` | Content between two delimiters. |
 | `separated_by` / `separated_by1` | A separated list (no trailing separator). |
@@ -105,4 +106,7 @@ directly.
 
 Outstanding (tracked in [rust/README.md](rust/README.md)): generic / binary
 (non-UTF-8) input — the surface is `&str`-only, so `bytes` requires UTF-8 boundaries
-and there is no byte/bitstring parsing. This is the one remaining structural gap.
+and there is no byte/bitstring parsing. This is the one remaining structural gap;
+the README's _Scope & limitations_ covers the consequences and workarounds, and
+recommends [`nom`](https://crates.io/crates/nom) / [`winnow`](https://crates.io/crates/winnow)
+(both `&[u8]`-capable) for genuinely binary or bit-level input.

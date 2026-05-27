@@ -3,11 +3,11 @@
 //!
 //! The crate parses `&str`, so the strategies are (1) transcode foreign
 //! encodings to UTF-8 up front, (2) carry binary as text (hex/base64) and decode
-//! in a `.map`/`.try_map`, and (3) use `bytes(n)` for fixed-width fields. The one
-//! pattern that needs more than the static combinators — a *dynamic* length
-//! prefix — is shown last, worked around by validation.
+//! in a `.map`/`.try_map`, and (3) use `bytes(n)` for fixed-width fields. A
+//! *dynamic* length prefix (read N, then read N more) is expressible directly
+//! with `.flat_map` — shown last.
 
-use nimble_parsec_rs::typed::{bytes, digits, literal, take_while1, Parser};
+use nimble_parsec_rs::typed::{bytes, integer, literal, take_while1, Parser};
 
 /// Workaround 1 — transcode a non-UTF-8 encoding to UTF-8, then parse normally.
 /// Latin-1 maps each byte `0x00..=0xFF` directly to the same Unicode scalar.
@@ -60,26 +60,18 @@ fn fixed_width_record_with_bytes() {
     assert_eq!(bytes(2).parse("é").unwrap(), "é");
 }
 
-/// The limit — a *dynamic* length prefix ("take the next N bytes, where N was
-/// just parsed") needs the parsed length to choose the next parser (monadic
-/// bind), which the static combinators don't provide. Work around it by parsing
-/// the (delimiter-bounded) content and validating the declared length.
+/// A *dynamic* length prefix ("take the next N bytes, where N was just parsed")
+/// uses the parsed length to choose the next parser — `.flat_map` (monadic bind).
+/// This is a netstring: a byte count, ':', then exactly that many bytes.
 #[test]
-fn dynamic_length_prefix_via_validation() {
-    // Netstring-ish "5:hello": a decimal length, ':', then the payload.
-    let framed = digits()
+fn dynamic_length_prefix_with_flat_map() {
+    let netstring = integer()
         .then_ignore(literal(":"))
-        .then(take_while1(|c: char| c != ','))
-        .try_map(|(len, payload): (&str, &str)| {
-            let declared: usize = len.parse().map_err(|_| "bad length".to_string())?;
-            let actual = payload.chars().count();
-            if actual == declared {
-                Ok(payload.to_string())
-            } else {
-                Err(format!("declared {declared} but found {actual}"))
-            }
-        });
+        .flat_map(|n: i64| bytes(n as usize));
 
-    assert_eq!(framed.parse("5:hello").unwrap(), "hello");
-    assert!(framed.parse("5:hi").is_err()); // length mismatch → rejected
+    assert_eq!(netstring.parse("5:hello").unwrap(), "hello");
+    assert!(netstring.parse("5:hi").is_err()); // not enough bytes for the count
+
+    // The count is in *bytes* (correct for netstrings): "2:é" is the 2-byte 'é'.
+    assert_eq!(netstring.parse("2:é").unwrap(), "é");
 }

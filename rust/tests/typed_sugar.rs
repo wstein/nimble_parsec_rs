@@ -17,6 +17,16 @@ fn fold_accumulates_without_an_intermediate_vec() {
 }
 
 #[test]
+fn flat_map_chooses_the_next_parser_from_a_parsed_value() {
+    // Context-sensitive: read a count, then exactly that many 'a's.
+    let counted = digits()
+        .map(|d: &str| d.parse::<usize>().unwrap())
+        .flat_map(|n| literal("a").repeated_in(n, n));
+    assert_eq!(counted.parse("3aaa").unwrap(), vec!["a", "a", "a"]);
+    assert!(counted.parse("3aa").is_err()); // too few for the declared count
+}
+
+#[test]
 fn delimited_keeps_only_the_content() {
     let p = delimited(literal("("), digits(), literal(")"));
     assert_eq!(p.parse("(42)").unwrap(), "42");

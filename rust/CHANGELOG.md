@@ -40,6 +40,10 @@ library, replacing the dynamic `Value`-based port.
   `wrap` are intentionally **omitted** — in the typed API they are `.map` into a
   typed value (or `.fold`); aliasing them would re-import the untyped term-list
   model. The idiomatic core namespace is left uncluttered.
+- `.flat_map(f)`: monadic bind — use a parser's output to choose the next parser,
+  enabling context-sensitive grammars (dynamic length prefixes such as
+  netstrings, layout-sensitive parsing). Not generatable (like `recursive`), so it
+  has no `Generate` impl.
 - `.fold(init, f)`: repeat a parser, folding outputs into an accumulator
   (NimbleParsec's `reduce`) without the intermediate `Vec` that
   `.repeated().map(…)` allocates. (`tag`/`wrap`/`unwrap_and_tag` are intentionally

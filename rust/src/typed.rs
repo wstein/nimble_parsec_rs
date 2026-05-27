@@ -278,6 +278,22 @@ pub trait Parser<'i> {
         TryMap { inner: self, f }
     }
 
+    /// Uses this parser's output to **choose the next parser** (monadic bind),
+    /// then runs that parser on the remaining input. This is what enables
+    /// context-sensitive grammars the static combinators can't express — e.g. a
+    /// length prefix that governs how much to read next, or indentation-sensitive
+    /// layouts. Like [`recursive`], a `flat_map` grammar is not generatable (the
+    /// next parser depends on a runtime value), so it does not implement
+    /// [`Generate`].
+    fn flat_map<U, F>(self, f: F) -> FlatMap<Self, F>
+    where
+        Self: Sized,
+        U: Parser<'i>,
+        F: Fn(Self::Output) -> U,
+    {
+        FlatMap { inner: self, f }
+    }
+
     /// Overrides the failure message (and the structured expectation) with `label`.
     fn labelled(self, label: &'static str) -> Labelled<Self>
     where
@@ -580,6 +596,27 @@ where
     fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U> {
         let out = self.inner.parse_next(input)?;
         (self.f)(out).map_err(|message| ParseFailure::rejected(message, input.rest, input.cursor))
+    }
+}
+
+/// [`Parser::flat_map`]. Intentionally has no [`Generate`] impl: the next parser
+/// depends on a runtime-parsed value, so a `flat_map` grammar cannot be sampled.
+pub struct FlatMap<P, F> {
+    inner: P,
+    f: F,
+}
+
+impl<'i, P, F, U> Parser<'i> for FlatMap<P, F>
+where
+    P: Parser<'i>,
+    F: Fn(P::Output) -> U,
+    U: Parser<'i>,
+{
+    type Output = U::Output;
+    fn parse_next(&self, input: &mut Input<'i>) -> PResult<'i, U::Output> {
+        let first = self.inner.parse_next(input)?;
+        let next = (self.f)(first);
+        next.parse_next(input)
     }
 }
 

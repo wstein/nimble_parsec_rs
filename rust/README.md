@@ -47,6 +47,7 @@ Leaves (free functions):
 Composition (methods on [`Parser`]):
 
 - `.map(f)` / `.try_map(f)` — transform the output (fallibly, for validation)
+- `.flat_map(f)` — use the output to choose the next parser (monadic bind), for context-sensitive grammars (length prefixes, layout)
 - `.to(value)` — replace the output with a constant
 - `.ignored()` — discard the output
 - `.then(p)` / `.ignore_then(p)` / `.then_ignore(p)` — sequence, keeping both / right / left
@@ -113,9 +114,33 @@ an earlier runtime-interpreted `Value`-based port (and its codegen macro) — th
 generic combinators are monomorphized by the compiler, so no interpreter or
 codegen layer is needed.
 
+## Scope & limitations
+
+This crate parses **UTF-8 text** (`&str`). That is the right surface for
+templates, config, DSLs, and source — its intended use — and combinator-level
+parity with NimbleParsec is complete. The one structural gap is input type:
+
+- **No `&[u8]` / binary / bitstring input.** You cannot parse non-UTF-8 bytes,
+  binary file formats or wire protocols, or bit-level fields. `bytes(n)` advances
+  _n bytes of text_ and must land on a UTF-8 boundary; it yields `&str`, not raw
+  bytes. Other encodings (Latin-1, …) must be transcoded to UTF-8 first.
+- **Workarounds (see [`tests/binary_workarounds.rs`](tests/binary_workarounds.rs)):**
+  transcode foreign encodings up front; carry binary as hex/base64 text and decode
+  in `.try_map`; use `bytes(n)` for fixed-width fields; and `.flat_map` for
+  dynamic length-prefixed fields (e.g. netstrings).
+- **When to reach for something else.** For genuinely binary, bit-level, or
+  large non-UTF-8 input, use [`nom`](https://crates.io/crates/nom) or
+  [`winnow`](https://crates.io/crates/winnow) — both parse `&[u8]` (and `nom`
+  has a `bits` sub-module). This crate deliberately stays focused on typed text
+  parsing rather than competing there.
+
 ## Roadmap
 
-- **Generic input.** Lift the `&str`-only restriction to bytes / custom streams.
+- **Generic input.** Lift the `&str`-only restriction to bytes / custom streams
+  (à la winnow's `Stream` trait) — the one change that would close the gap above.
+  It touches `Input`, every leaf, and position tracking, so it is its own
+  milestone (see [`docs/rfcs/0001-typed-parser.md`](docs/rfcs/0001-typed-parser.md)
+  §non-goals).
 - **Fuzz corpus.** A persisted `cargo-fuzz` target alongside the property tests.
 - **Benchmarks.** A Criterion suite for the typed combinators.
 
