@@ -5,7 +5,7 @@ use nimble_parsec_rs::{any, literal, recursive, Parser};
 use proptest::prelude::*;
 
 // A balanced-parenthesis grammar returning its nesting depth.
-fn parens<'i>() -> impl Parser<'i, Output = u32> {
+fn parens<'i>() -> impl Parser<&'i str, Output = u32> {
     recursive(|expr| {
         literal("(")
             .ignore_then(expr)
@@ -20,7 +20,7 @@ proptest! {
     #[test]
     fn literal_consumes_exactly_its_prefix(tail in "[^a-z].*|") {
         let input = format!("abc{tail}");
-        let (matched, rest) = literal("abc").parse_partial(&input).unwrap();
+        let (matched, rest) = literal("abc").parse_partial(input.as_str()).unwrap();
         prop_assert_eq!(matched, "abc");
         prop_assert_eq!(rest, tail.as_str());
     }
@@ -29,7 +29,7 @@ proptest! {
     // and yields exactly one item per character.
     #[test]
     fn any_repeated_is_total_and_consumes_everything(input in ".*") {
-        let chars = any().repeated().parse(&input).expect("repeated any is total");
+        let chars = any().repeated().parse(input.as_str()).expect("repeated any is total");
         prop_assert_eq!(chars.len(), input.chars().count());
     }
 
@@ -38,6 +38,6 @@ proptest! {
     #[test]
     fn recursive_depth_round_trips_within_the_cap(depth in 0u32..16) {
         let input = format!("{}x{}", "(".repeat(depth as usize), ")".repeat(depth as usize));
-        prop_assert_eq!(parens().parse(&input).unwrap(), depth);
+        prop_assert_eq!(parens().parse(input.as_str()).unwrap(), depth);
     }
 }

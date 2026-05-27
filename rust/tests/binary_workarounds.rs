@@ -18,7 +18,7 @@ fn transcode_latin1_then_parse() {
     let utf8: String = latin1.iter().map(|&b| b as char).collect();
 
     let word = take_while1(|c: char| c.is_alphabetic());
-    assert_eq!(word.parse(&utf8).unwrap(), "café");
+    assert_eq!(word.parse(utf8.as_str()).unwrap(), "café");
 }
 
 /// Workaround 2 — carry binary as hex text and decode it inside the grammar with

@@ -188,7 +188,7 @@ fn bounded_repetition() {
 
 // A balanced-parenthesis grammar that returns its nesting depth, exercising the
 // typed `recursive`.
-fn parens<'i>() -> impl Parser<'i, Output = u32> {
+fn parens<'i>() -> impl Parser<&'i str, Output = u32> {
     recursive(|expr| {
         literal("(")
             .ignore_then(expr)
@@ -214,7 +214,7 @@ fn recursive_grammar_is_depth_capped() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let input = format!("{}x{}", "(".repeat(50_000), ")".repeat(50_000));
-            let err = parens().parse(&input).unwrap_err();
+            let err = parens().parse(input.as_str()).unwrap_err();
             // The cap message bubbles up through the enclosing `or`s, which join
             // their branches' reasons, so it is a substring.
             assert!(

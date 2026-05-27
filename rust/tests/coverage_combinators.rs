@@ -125,9 +125,7 @@ fn delimited_success_returns_content_only() {
 fn separated_by1_error_on_empty_input() {
     // When the input is empty the first item fails, bubbling its error.
     // `digits()` uses `take_while1`, so the error message is the take_while1 message.
-    let err = separated_by1(digits(), literal(","))
-        .parse("")
-        .unwrap_err();
+    let err = separated_by1(digits(), literal(",")).parse("").unwrap_err();
     assert!(!err.reason.is_empty(), "expected a non-empty error reason");
     assert!(err.rest.is_empty()); // failed at position 0
 }
@@ -142,7 +140,7 @@ fn separated_by1_single_item() {
 
 // ── recursive with explicit shallow depth cap ─────────────────────────────────
 
-fn parens<'i>() -> impl Parser<'i, Output = u32> {
+fn parens() -> impl Parser<&'static str, Output = u32> {
     recursive(|expr| {
         literal("(")
             .ignore_then(expr)
@@ -157,9 +155,7 @@ fn recursive_shallow_depth_cap_fails_gracefully() {
     // With max_depth=2, inputs requiring more than 2 Recursive crossings fail.
     // "(((x)))" needs 4 crossings → exceeds cap of 2.
     // A depth of 2 is safe on any default stack; no extra thread needed.
-    let err = parens()
-        .parse_with_max_depth("(((x)))", 2)
-        .unwrap_err();
+    let err = parens().parse_with_max_depth("(((x)))", 2).unwrap_err();
     assert!(
         err.reason.contains("maximum recursion depth exceeded"),
         "reason was: {}",

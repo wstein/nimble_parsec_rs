@@ -8,8 +8,8 @@
 //!   output but restoring the input.
 //! - `not` succeeds when the inner parser would fail, always yielding `()`.
 
-use nimble_parsec_rs::typed::{any, choice, literal, lookahead, not, Parser};
 use nimble_parsec_rs::nimble;
+use nimble_parsec_rs::typed::{any, choice, literal, lookahead, not, Parser};
 
 // ── lookahead ─────────────────────────────────────────────────────────────────
 
@@ -19,9 +19,9 @@ fn lookahead_with_or_inner_is_zero_width() {
     // `.then(any())` then actually consumes the first character.
     let p = lookahead(literal("a").or(literal("b"))).then(any());
     let ((peeked, consumed), rest) = p.parse_partial("ab").unwrap();
-    assert_eq!(peeked, "a");   // lookahead saw "a"
+    assert_eq!(peeked, "a"); // lookahead saw "a"
     assert_eq!(consumed, 'a'); // any() consumed "a"
-    assert_eq!(rest, "b");     // "b" untouched
+    assert_eq!(rest, "b"); // "b" untouched
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn lookahead_compound_parser() {
     let p = lookahead(literal("a").then(literal("b")));
     let (out, rest) = p.parse_partial("abc").unwrap();
     assert_eq!(out, ("a", "b")); // the compound output
-    assert_eq!(rest, "abc");     // cursor completely restored
+    assert_eq!(rest, "abc"); // cursor completely restored
 }
 
 #[test]
@@ -88,10 +88,7 @@ fn not_with_compound_inner() {
 #[test]
 fn not_error_message_is_exact() {
     let err = not(literal("x")).parse("x").unwrap_err();
-    assert_eq!(
-        err.reason,
-        "did not expect the lookahead parser to match"
-    );
+    assert_eq!(err.reason, "did not expect the lookahead parser to match");
     // `not` uses `ParseFailure::rejected` — `expected` is empty.
     assert!(
         err.expected.is_empty(),

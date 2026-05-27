@@ -14,7 +14,7 @@ enum Token {
 // A run of characters up to (but not consuming) `stop`, collected into a String.
 // This is the typed equivalent of the `lookahead_not(stop) |> utf8_char` +
 // `reduce(to_string)` idiom in the Value-based lexer.
-fn chars_until<'i>(stop: &'static str) -> impl Parser<'i, Output = String> {
+fn chars_until(stop: &'static str) -> impl Parser<&'static str, Output = String> {
     not(literal(stop))
         .ignore_then(any())
         .repeated()
@@ -22,7 +22,7 @@ fn chars_until<'i>(stop: &'static str) -> impl Parser<'i, Output = String> {
 }
 
 // `{{! … }}` — a comment, lexed and then dropped (`None`).
-fn comment<'i>() -> impl Parser<'i, Output = Option<Token>> {
+fn comment() -> impl Parser<&'static str, Output = Option<Token>> {
     literal("{{!")
         .ignore_then(chars_until("}}"))
         .then_ignore(literal("}}"))
@@ -30,7 +30,7 @@ fn comment<'i>() -> impl Parser<'i, Output = Option<Token>> {
 }
 
 // `{{ … }}` — a tag; its inner text is kept.
-fn tag<'i>() -> impl Parser<'i, Output = Option<Token>> {
+fn tag() -> impl Parser<&'static str, Output = Option<Token>> {
     literal("{{")
         .ignore_then(chars_until("}}"))
         .then_ignore(literal("}}"))
@@ -38,7 +38,7 @@ fn tag<'i>() -> impl Parser<'i, Output = Option<Token>> {
 }
 
 // A maximal run of text up to the next `{{`.
-fn text<'i>() -> impl Parser<'i, Output = Option<Token>> {
+fn text() -> impl Parser<&'static str, Output = Option<Token>> {
     not(literal("{{"))
         .ignore_then(any())
         .repeated_at_least(1)
@@ -47,7 +47,7 @@ fn text<'i>() -> impl Parser<'i, Output = Option<Token>> {
 
 // The whole document: comments (dropped) before tags before text, repeated and
 // the dropped comments filtered out.
-fn template<'i>() -> impl Parser<'i, Output = Vec<Token>> {
+fn template() -> impl Parser<&'static str, Output = Vec<Token>> {
     comment()
         .or(tag())
         .or(text())

@@ -108,7 +108,7 @@ fn take_while1_on_empty_fails_with_message() {
     let err = take_while1(|c: char| c.is_alphabetic())
         .parse("")
         .unwrap_err();
-    assert_eq!(err.reason, "expected at least one matching character");
+    assert_eq!(err.reason, "expected at least one matching token");
 }
 
 // ── any on ASCII ──────────────────────────────────────────────────────────────

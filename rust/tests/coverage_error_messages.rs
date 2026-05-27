@@ -22,8 +22,8 @@ fn literal_error_message_format() {
 #[test]
 fn any_on_empty_string() {
     let err = any().parse("").unwrap_err();
-    assert_eq!(err.reason, "expected any character");
-    assert_eq!(err.expected, vec!["expected any character"]);
+    assert_eq!(err.reason, "expected any token");
+    assert_eq!(err.expected, vec!["expected any token"]);
 }
 
 #[test]
@@ -42,11 +42,8 @@ fn take_while1_on_empty_fails() {
     let err = take_while1(|c: char| c.is_alphabetic())
         .parse("")
         .unwrap_err();
-    assert_eq!(err.reason, "expected at least one matching character");
-    assert_eq!(
-        err.expected,
-        vec!["expected at least one matching character"]
-    );
+    assert_eq!(err.reason, "expected at least one matching token");
+    assert_eq!(err.expected, vec!["expected at least one matching token"]);
 }
 
 #[test]
@@ -55,7 +52,7 @@ fn take_while1_on_nonmatch_fails() {
     let err = take_while1(|c: char| c.is_alphabetic())
         .parse("123")
         .unwrap_err();
-    assert_eq!(err.reason, "expected at least one matching character");
+    assert_eq!(err.reason, "expected at least one matching token");
 }
 
 #[test]
@@ -86,10 +83,7 @@ fn parse_requires_all_input_consumed() {
 fn or_joins_two_branch_reasons() {
     let err = literal("a").or(literal("b")).parse("c").unwrap_err();
     assert_eq!(err.reason, "expected \"a\" or expected \"b\"");
-    assert_eq!(
-        err.expected,
-        vec!["expected \"a\"", "expected \"b\""]
-    );
+    assert_eq!(err.expected, vec!["expected \"a\"", "expected \"b\""]);
 }
 
 #[test]
@@ -133,10 +127,7 @@ fn choice_joins_all_alternative_reasons() {
 fn not_matched_error_message() {
     // `not` uses `ParseFailure::rejected` — the `expected` field is empty.
     let err = not(literal("x")).parse("x").unwrap_err();
-    assert_eq!(
-        err.reason,
-        "did not expect the lookahead parser to match"
-    );
+    assert_eq!(err.reason, "did not expect the lookahead parser to match");
     assert!(
         err.expected.is_empty(),
         "not's expected should be empty; got {:?}",

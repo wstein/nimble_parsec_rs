@@ -19,8 +19,9 @@ fn bytes_takes_exactly_n_bytes_on_a_char_boundary() {
 
     // Generated input round-trips.
     for seed in 0..16u64 {
-        let sample = generate(&bytes(4), seed);
-        assert_eq!(bytes(4).parse(&sample).unwrap().len(), 4);
+        let p = bytes::<&str>(4);
+        let sample = generate(&p, seed);
+        assert_eq!(bytes::<&str>(4).parse(sample.as_str()).unwrap().len(), 4);
     }
 }
 
@@ -86,9 +87,10 @@ fn integer_parses_a_digit_run_into_i64() {
 #[test]
 fn integer_generates_round_trippable_values() {
     for seed in 0..32u64 {
-        let sample = generate(&integer(), seed);
+        let p = integer::<&str>();
+        let sample = generate(&p, seed);
         assert!(
-            integer().parse(&sample).is_ok(),
+            integer::<&str>().parse(sample.as_str()).is_ok(),
             "seed {seed} produced {sample:?}"
         );
     }

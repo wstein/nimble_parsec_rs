@@ -17,7 +17,7 @@ enum Lexeme {
     Raw(String),
 }
 
-fn chars_until<'i>(stop: &'static str) -> impl Parser<'i, Output = String> {
+fn chars_until(stop: &'static str) -> impl Parser<&'static str, Output = String> {
     repeat(lookahead_not(string(stop)).ignore_then(any()))
         .map(|cs: Vec<char>| cs.into_iter().collect())
 }
@@ -27,7 +27,7 @@ fn is_name(c: char) -> bool {
 }
 
 // `{{ ... }}` → a Tag lexeme paired with the end byte offset.
-fn tag<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
+fn tag() -> impl Parser<&'static str, Output = (Lexeme, usize)> {
     byte_offset(
         string("{{")
             .ignore_then(chars_until("}}"))
@@ -38,7 +38,7 @@ fn tag<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
 
 // `{{{{#name}}}}…{{{{/name}}}}` with the open/close name match validated in a
 // `try_map` — a failed match makes the branch fail and `choice` backtrack.
-fn raw<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
+fn raw() -> impl Parser<&'static str, Output = (Lexeme, usize)> {
     byte_offset(
         string("{{{{#")
             .ignore_then(take_while1(is_name))
@@ -58,7 +58,7 @@ fn raw<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
     .map(|(content, end)| (Lexeme::Raw(content), end))
 }
 
-fn text<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
+fn text() -> impl Parser<&'static str, Output = (Lexeme, usize)> {
     byte_offset(
         lookahead_not(string("{{"))
             .ignore_then(any())
@@ -68,7 +68,7 @@ fn text<'i>() -> impl Parser<'i, Output = (Lexeme, usize)> {
     .map(|(run, end)| (Lexeme::Text(run), end))
 }
 
-fn lex<'i>() -> impl Parser<'i, Output = Vec<(Lexeme, usize)>> {
+fn lex() -> impl Parser<&'static str, Output = Vec<(Lexeme, usize)>> {
     repeat(choice((raw(), tag(), text())))
 }
 
@@ -111,7 +111,7 @@ enum Tok {
 }
 
 // Balanced parens captured as their raw source — `recursive` yielding `String`.
-fn paren<'i>() -> impl Parser<'i, Output = String> {
+fn paren() -> impl Parser<&'static str, Output = String> {
     recursive(|paren| {
         string("(")
             .then(
@@ -119,7 +119,7 @@ fn paren<'i>() -> impl Parser<'i, Output = String> {
                     paren,
                     lookahead_not(choice([string("("), string(")")]))
                         .ignore_then(any())
-                        .map(|c| c.to_string()),
+                        .map(|c: char| c.to_string()),
                 ))
                 .repeated(),
             )
@@ -135,18 +135,18 @@ fn paren<'i>() -> impl Parser<'i, Output = String> {
     })
 }
 
-fn text_char<'i>() -> impl Parser<'i, Output = char> {
+fn text_char() -> impl Parser<&'static str, Output = char> {
     // A many-arm homogeneous array `choice` under `lookahead_not`.
     lookahead_not(choice([string("|"), string(" "), string("(")])).ignore_then(any())
 }
 
-fn text_part<'i>() -> impl Parser<'i, Output = Tok> {
+fn text_part() -> impl Parser<&'static str, Output = Tok> {
     choice((paren(), text_char().map(|c| c.to_string())))
         .repeated_at_least(1)
         .map(|frags: Vec<String>| Tok::Text(frags.concat()))
 }
 
-fn top<'i>() -> impl Parser<'i, Output = Vec<Tok>> {
+fn top() -> impl Parser<&'static str, Output = Vec<Tok>> {
     // Eight arms — the arity `np_expr`'s `top` needs, and the tuple-`choice` max.
     repeat(choice((
         string("||").map(|_| Tok::Pipe),

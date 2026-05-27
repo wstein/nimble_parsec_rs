@@ -5,8 +5,8 @@
 //! discards the parser output, returning `()` on success and propagating the
 //! original error unchanged on failure.
 
-use nimble_parsec_rs::typed::{digits, literal, Parser};
 use nimble_parsec_rs::nimble;
+use nimble_parsec_rs::typed::{digits, literal, Parser};
 
 // ── ignored() success / failure ───────────────────────────────────────────────
 

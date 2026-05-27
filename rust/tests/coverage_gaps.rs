@@ -10,10 +10,10 @@
 //!   `eos`, `optional`, `times`, `label`, `line`, `debug`, `post_traverse`,
 //!   `pre_traverse`
 
-use nimble_parsec_rs::typed::{
-    choice, empty, literal, repeated_until, separated_by, Input, Literal, Parser,
-};
 use nimble_parsec_rs::nimble;
+use nimble_parsec_rs::typed::{
+    choice, empty, literal, repeated_until, separated_by, Eof, Input, Parser,
+};
 
 // ── ParseFailure::fmt (Display) ───────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ fn fold_stops_on_zero_width_match() {
 fn choice_zero_alternatives_produces_has_no_options_error() {
     // An empty array reaches the `reasons.is_empty()` branch of
     // `choice_failure` (typed.rs line 966-967), yielding the dedicated message.
-    let arr: [Literal; 0] = [];
+    let arr: [Eof<&str>; 0] = [];
     let err = choice(arr).parse("anything").unwrap_err();
     assert_eq!(err.reason, "choice has no options");
 }
@@ -151,9 +151,7 @@ fn nimble_optional_alias() {
 #[test]
 fn nimble_times_alias() {
     // `nimble::times(p, n)` repeats exactly `n` times (typed.rs lines 1783–1786).
-    let result = nimble::times(literal("ab"), 3)
-        .parse("ababab")
-        .unwrap();
+    let result = nimble::times(literal("ab"), 3).parse("ababab").unwrap();
     assert_eq!(result, vec!["ab", "ab", "ab"]);
     assert!(nimble::times(literal("ab"), 3).parse("abab").is_err());
 }
@@ -211,7 +209,10 @@ fn nimble_post_traverse_rejection_propagates() {
     });
     let err = p.parse("x").unwrap_err();
     assert_eq!(err.reason, "bad token");
-    assert!(err.expected.is_empty(), "rejected failure has empty expected");
+    assert!(
+        err.expected.is_empty(),
+        "rejected failure has empty expected"
+    );
 }
 
 // ── nimble module: pre_traverse ───────────────────────────────────────────────

@@ -34,11 +34,11 @@ fn debug_passes_the_output_through() {
 
 // A non-recursive grammar built from literals / alternation / repetition, which
 // `generate` can round-trip.
-fn letters<'i>() -> impl Parser<'i, Output = Vec<&'i str>> + Generate {
+fn letters<'i>() -> impl Parser<&'i str, Output = Vec<&'i str>> + Generate {
     literal("a").or(literal("b")).repeated()
 }
 
-fn tagged_number<'i>() -> impl Parser<'i, Output = (&'i str, &'i str)> + Generate {
+fn tagged_number<'i>() -> impl Parser<&'i str, Output = (&'i str, &'i str)> + Generate {
     literal("(").ignore_then(digits()).then(literal(")"))
 }
 
@@ -52,12 +52,12 @@ fn generated_input_round_trips_through_the_parser() {
     for seed in 0..64u64 {
         let sample = generate(&letters(), seed);
         assert!(
-            letters().parse(&sample).is_ok(),
+            letters().parse(sample.as_str()).is_ok(),
             "letters seed {seed} produced {sample:?}"
         );
 
         let sample = generate(&tagged_number(), seed);
-        let parsed = tagged_number().parse(&sample);
+        let parsed = tagged_number().parse(sample.as_str());
         assert!(
             parsed.is_ok(),
             "tagged_number seed {seed} produced {sample:?}"

@@ -95,7 +95,7 @@ fn tuple_choice_allows_differently_typed_alternatives() {
         vec![
             "expected \"if\"".to_string(),
             "expected \"else\"".to_string(),
-            "expected at least one matching character".to_string(),
+            "expected at least one matching token".to_string(),
         ]
     );
 }
@@ -107,7 +107,7 @@ fn array_choice_still_works() {
 }
 
 // A `[d, d, …]` grammar exercising delimited + separated_by, used for round-trip.
-fn int_list<'i>() -> impl Parser<'i, Output = Vec<&'i str>> + Generate {
+fn int_list<'i>() -> impl Parser<&'i str, Output = Vec<&'i str>> + Generate {
     delimited(
         literal("["),
         separated_by(digits(), literal(",")),
@@ -120,7 +120,7 @@ fn generate_round_trips_through_the_sugar() {
     for seed in 0..64u64 {
         let sample = generate(&int_list(), seed);
         assert!(
-            int_list().parse(&sample).is_ok(),
+            int_list().parse(sample.as_str()).is_ok(),
             "seed {seed} produced {sample:?}"
         );
     }
