@@ -1,0 +1,5 @@
+# cargo-fuzz requires nightly for -Zsanitizer=address.
+# This file pins the fuzz/ sub-package to nightly while the parent
+# crate continues to build on stable.
+[toolchain]
+channel = "nightly"
